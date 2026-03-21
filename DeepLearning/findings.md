@@ -70,6 +70,7 @@
 
 - 已在 `gpu_env` 中跑通真实比赛数据。
 - 第一版验证集最佳准确率为 `0.6944444179534912`。
+- 第一版 Kaggle public score 为 `0.61178`。
 - 第一版 submission 已生成：
   - `data/submissions/20260321_123354_exp_001_resnet18_haar_submission.csv`
 - 训练与预测登记已经追加到：

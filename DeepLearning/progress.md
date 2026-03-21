@@ -26,3 +26,4 @@
   - 最佳 checkpoint：`outputs/exp_001_resnet18_haar/checkpoints/best-v1.ckpt`
   - 验证集最佳准确率：`0.6944444179534912`
   - submission 文件：`data/submissions/20260321_123354_exp_001_resnet18_haar_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.61178`。
