@@ -1,0 +1,44 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Kaggle credentials
+.kaggle/
+kaggle.json
+
+# Local data and outputs
+data/raw/
+data/interim/
+data/processed/
+data/splits/
+outputs/
+logs/
+runs/
+tmp/
+
+# Model artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Reports generated during experiments
+reports/figures/
+reports/tables/
+
+# Temporary analysis artifacts
+_cv_ga1_extracted.txt
