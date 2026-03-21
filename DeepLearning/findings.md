@@ -54,3 +54,28 @@
 - 只接受 Kaggle 提交，不接受本地额外提交。
 - 最终 notebook 必须自包含、可运行、文档充分，能够让助教看懂设计选择与实验洞察。
 - 文档明确建议大量训练与实验可以放在离线环境完成，最终 notebook 只保留总结、必要图表和最终预测流程。
+
+### 当前实现状态
+
+- 第一版 pipeline 已按 `Lightning + timm + yaml` 落成基础骨架。
+- 当前默认首版实验是 `exp_001_resnet18_haar`：
+  - 预处理：HAAR 裁脸，失败时中心裁剪兜底；
+  - 模型：`resnet18` 预训练；
+  - 训练：Lightning + `AdamW` + `CosineAnnealingLR`；
+  - 输出：最佳 checkpoint、metrics、实验 registry、规范命名的 `submission.csv`。
+- 已增加一键入口 `scripts/run_first_submission.py`，用于顺序执行下载、裁脸、划分、训练、预测。
+- 当前最大的非代码风险不是实现，而是 Kaggle 凭证缺失导致无法拿到真实比赛数据。
+
+### 第一版真实运行结果
+
+- 已在 `gpu_env` 中跑通真实比赛数据。
+- 第一版验证集最佳准确率为 `0.6944444179534912`。
+- 第一版 submission 已生成：
+  - `data/submissions/20260321_123354_exp_001_resnet18_haar_submission.csv`
+- 训练与预测登记已经追加到：
+  - `reports/experiments/registry.csv`
+
+### 运行中暴露的问题
+
+- `class` 列在 `itertuples()` 中会因关键字改名，导致预处理元数据最初丢失标签；已通过测试修复为 `to_dict(orient="records")` 流程。
+- Windows `gbk` 控制台与 Lightning 默认 `rich` 进度条不兼容；已关闭 rich progress/model summary，改为稳定模式运行。

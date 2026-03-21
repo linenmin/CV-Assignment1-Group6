@@ -1,0 +1,9 @@
+lightning
+timm
+albumentations
+pandas
+numpy
+opencv-python
+scikit-learn
+pyyaml
+kaggle

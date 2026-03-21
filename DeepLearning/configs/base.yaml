@@ -1,0 +1,29 @@
+experiment_name: base_experiment
+seed: 42
+
+data:
+  raw_dir: data/raw/kul-computer-vision-ga-1-2026
+  processed_dir: data/processed/faces_224
+  splits_dir: data/splits/default
+  submissions_dir: data/submissions
+  detector_cache_dir: data/interim/detectors
+  face_size: 224
+  val_ratio: 0.2
+  num_workers: 4
+  detector: haar
+
+model:
+  backbone_name: resnet18
+  pretrained: true
+  dropout: 0.2
+
+train:
+  batch_size: 16
+  max_epochs: 8
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  accelerator: auto
+  devices: 1
+  precision: 32
+  early_stopping_patience: 3
+  scheduler: cosine

@@ -25,8 +25,8 @@
 | Phase 1 | pending | 明确 2.3 的任务边界、输入输出、评价指标与提交格式 |
 | Phase 2 | completed | 设计深度学习子项目的协作流程、目录结构与迭代节奏 |
 | Phase 3 | completed | 与用户确认设计方案 |
-| Phase 4 | in_progress | 创建分支 `DL`、初始化项目骨架与 `.gitignore` |
-| Phase 5 | pending | 落地第一版可运行基线并建立实验记录规范 |
+| Phase 4 | completed | 创建分支 `DL`、初始化项目骨架与 `.gitignore` |
+| Phase 5 | completed | 落地第一版可运行基线并建立实验记录规范 |
 
 ## 决策记录
 
@@ -41,3 +41,5 @@
 | 时间 | 问题 | 处理 |
 |---|---|---|
 | 2026-03-21 | 直接在 PowerShell 打印 PDF 提取文本时触发 `UnicodeEncodeError` | 改用 UTF-8 文件中转或显式编码输出 |
+| 2026-03-21 | `conda` 的 PowerShell alias 无法稳定执行嵌套命令 | 改用 `cmd /c` + `conda.bat activate gpu_env` |
+| 2026-03-21 | Kaggle CLI 下载时报认证缺失 | 确认为本机缺少 `~/.kaggle/kaggle.json`，等待用户提供 |

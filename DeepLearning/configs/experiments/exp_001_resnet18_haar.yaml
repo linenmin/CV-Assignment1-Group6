@@ -1,0 +1,17 @@
+experiment_name: exp_001_resnet18_haar
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+
+model:
+  backbone_name: resnet18
+  pretrained: true
+  dropout: 0.2
+
+train:
+  batch_size: 16
+  max_epochs: 6
+  learning_rate: 0.0003
+  weight_decay: 0.0001
