@@ -17,6 +17,7 @@ from dl_pipeline.common.paths import ensure_dir, project_path
 from dl_pipeline.common.registry import append_registry_row
 from dl_pipeline.common.seed import seed_everything
 from dl_pipeline.data.datamodule import FaceDataModule
+from dl_pipeline.training.progress import AsciiTQDMProgressBar
 from dl_pipeline.training.lightning_module import FaceClassifierModule
 
 
@@ -66,6 +67,7 @@ def main() -> None:
         patience=config["train"]["early_stopping_patience"],
         mode="max",
     )
+    progress_bar = AsciiTQDMProgressBar(refresh_rate=1)
 
     trainer = L.Trainer(
         max_epochs=config["train"]["max_epochs"],
@@ -73,9 +75,9 @@ def main() -> None:
         devices=config["train"]["devices"],
         precision=config["train"]["precision"],
         logger=logger,
-        callbacks=[checkpoint_callback, early_stopping],
+        callbacks=[checkpoint_callback, early_stopping, progress_bar],
         deterministic=True,
-        enable_progress_bar=False,
+        enable_progress_bar=True,
         enable_model_summary=False,
         log_every_n_steps=1,
     )

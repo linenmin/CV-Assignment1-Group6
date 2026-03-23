@@ -16,6 +16,7 @@ from dl_pipeline.common.paths import project_path
 from dl_pipeline.common.registry import append_registry_row
 from dl_pipeline.data.datamodule import FaceDataModule
 from dl_pipeline.inference.submission import build_submission_dataframe, save_submission_dataframe
+from dl_pipeline.training.progress import AsciiTQDMProgressBar
 from dl_pipeline.training.lightning_module import FaceClassifierModule
 
 
@@ -66,7 +67,8 @@ def main() -> None:
         devices=config["train"]["devices"],
         precision=config["train"]["precision"],
         logger=False,
-        enable_progress_bar=False,
+        callbacks=[AsciiTQDMProgressBar(refresh_rate=1)],
+        enable_progress_bar=True,
         enable_model_summary=False,
     )
     outputs = trainer.predict(model, datamodule=datamodule)
