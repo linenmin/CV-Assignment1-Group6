@@ -134,3 +134,23 @@
   - 这次从 `0.62720` 提升到 `0.78799`，说明“人脸专用预训练 backbone + 轻量部分微调”是当前最有效的主线；
   - 提升的关键不是继续换检测器，而是让强预训练人脸 backbone 对比赛分布做适度适配；
   - 这一结果也说明，开发阶段仍应保留验证集作为护栏，但真正决定方向的仍然是 Kaggle 分数。
+
+### Session 8
+
+- 已在 `exp_009` 主线上继续做单变量细调，新增实验：
+  - `exp_010_ir101_adaface_haar_10ep_laststage_ft_lr1e5`
+- 本次唯一核心变量是把 backbone 学习率从 `3e-5` 继续降低到 `1e-5`：
+  - 继续使用 `IR101 + AdaFace`
+  - 继续使用 `HAAR`
+  - 继续使用 `112x112`
+  - 继续只解冻最后一个 stage
+  - 分类头学习率保持 `3e-4`
+- 该实验已经完成训练与预测：
+  - 最佳 checkpoint：`outputs/exp_010_ir101_adaface_haar_10ep_laststage_ft_lr1e5/checkpoints/best.ckpt`
+  - 本地验证集最佳准确率：`1.0`
+  - 新 submission：`data/submissions/20260401_170932_exp_010_ir101_adaface_haar_10ep_laststage_ft_lr1e5_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.87885`。
+- 结论：
+  - 从 `0.78799` 提升到 `0.87885`，说明 backbone 微调幅度进一步收敛后，测试集表现继续明显改善；
+  - 当前最优方向已经非常明确：不是“更强更猛”的微调，而是“更温和、更受控”的微调；
+  - 下一步应继续围绕这条主线优化模型选择标准，而不是回到 detector、增强或更大 backbone 的大改路线。
