@@ -57,6 +57,35 @@ def _mean_topk_similarity(
     return topk_values.mean(dim=1)
 
 
+def _normalize_quality_from_norms(norms: torch.Tensor) -> torch.Tensor:
+    min_value = norms.min()
+    max_value = norms.max()
+    if torch.isclose(max_value, min_value):
+        return torch.ones_like(norms)
+    return ((norms - min_value) / (max_value - min_value)).clamp(0.0, 1.0)
+
+
+def _weighted_topk_similarity(
+    query_embeddings: torch.Tensor,
+    gallery_embeddings: torch.Tensor,
+    gallery_weights: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    if gallery_embeddings.numel() == 0:
+        raise ValueError("gallery_embeddings 不能为空。")
+    if gallery_weights.numel() == 0:
+        raise ValueError("gallery_weights 不能为空。")
+
+    normalized_queries = _normalize_embeddings(query_embeddings)
+    normalized_gallery = _normalize_embeddings(gallery_embeddings)
+    similarities = normalized_queries @ normalized_gallery.T
+    top_k = min(k, normalized_gallery.shape[0])
+    topk_values, topk_indices = similarities.topk(top_k, dim=1)
+    selected_weights = gallery_weights[topk_indices]
+    normalized_weights = selected_weights / selected_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    return (topk_values * normalized_weights).sum(dim=1)
+
+
 def compute_class_prototypes(
     embeddings: torch.Tensor,
     labels: torch.Tensor,
@@ -204,6 +233,88 @@ def predict_open_set_with_richer_scorer(
     )
     predictions[reject_mask] = other_label
     return predictions, best_target_scores, other_scores, second_target_scores
+
+
+def predict_open_set_with_quality_aware_scorer(
+    query_embeddings: torch.Tensor,
+    gallery_embeddings: torch.Tensor,
+    gallery_labels: torch.Tensor,
+    target_labels: list[int],
+    other_label: int,
+    threshold: float,
+    target_top_k: int,
+    other_top_k: int,
+    other_margin: float,
+    target_margin: float,
+    quality_alpha: float,
+    low_quality_threshold_boost: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if target_top_k < 1:
+        raise ValueError("target_top_k 至少为 1。")
+    if other_top_k < 1:
+        raise ValueError("other_top_k 至少为 1。")
+    if not target_labels:
+        raise ValueError("target_labels 不能为空。")
+
+    gallery_norms = torch.linalg.norm(gallery_embeddings, dim=1)
+    gallery_quality = _normalize_quality_from_norms(gallery_norms)
+    gallery_weights = 1.0 + quality_alpha * gallery_quality
+
+    query_norms = torch.linalg.norm(query_embeddings, dim=1)
+    query_quality = _normalize_quality_from_norms(
+        torch.cat([gallery_norms, query_norms], dim=0)
+    )[gallery_norms.shape[0] :]
+    effective_thresholds = threshold + low_quality_threshold_boost * (1.0 - query_quality)
+
+    target_scores_by_label: dict[int, torch.Tensor] = {}
+    for label in target_labels:
+        class_mask = gallery_labels == label
+        class_gallery = gallery_embeddings[class_mask]
+        class_weights = gallery_weights[class_mask]
+        if class_gallery.numel() == 0:
+            raise ValueError(f"类别 {label} 没有可用 gallery。")
+        target_scores_by_label[label] = _weighted_topk_similarity(
+            query_embeddings,
+            class_gallery,
+            class_weights,
+            target_top_k,
+        )
+
+    other_mask = gallery_labels == other_label
+    other_gallery = gallery_embeddings[other_mask]
+    other_weights = gallery_weights[other_mask]
+    if other_gallery.numel() == 0:
+        raise ValueError("other 类没有可用 gallery。")
+    other_scores = _weighted_topk_similarity(
+        query_embeddings,
+        other_gallery,
+        other_weights,
+        other_top_k,
+    )
+
+    ordered_labels = list(target_scores_by_label.keys())
+    target_score_matrix = torch.stack([target_scores_by_label[label] for label in ordered_labels], dim=1)
+    best_target_scores, best_target_indices = target_score_matrix.max(dim=1)
+    predicted_targets = torch.tensor(
+        [ordered_labels[index] for index in best_target_indices.tolist()],
+        device=query_embeddings.device,
+        dtype=torch.long,
+    )
+
+    if target_score_matrix.shape[1] > 1:
+        top2_values, _ = target_score_matrix.topk(2, dim=1)
+        second_target_scores = top2_values[:, 1]
+    else:
+        second_target_scores = torch.full_like(best_target_scores, float("-inf"))
+
+    predictions = predicted_targets.clone()
+    reject_mask = (
+        (best_target_scores < effective_thresholds)
+        | ((best_target_scores - other_scores) < other_margin)
+        | ((best_target_scores - second_target_scores) < target_margin)
+    )
+    predictions[reject_mask] = other_label
+    return predictions, best_target_scores, other_scores, second_target_scores, effective_thresholds
 
 
 def select_best_threshold(
@@ -383,6 +494,99 @@ def select_best_richer_scorer_params_leave_one_out(
                 "other_top_k": other_top_k,
                 "other_margin": other_margin,
                 "target_margin": target_margin,
+            }
+            best_accuracy = accuracy
+
+    return best_params, best_accuracy
+
+
+def select_best_quality_aware_params_leave_one_out(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    target_labels: list[int],
+    other_label: int,
+    threshold_values: list[float],
+    target_top_k_values: list[int],
+    other_top_k_values: list[int],
+    other_margin_values: list[float],
+    target_margin_values: list[float],
+    quality_alpha_values: list[float],
+    low_quality_threshold_boost_values: list[float],
+) -> tuple[dict[str, float | int], float]:
+    if not threshold_values:
+        raise ValueError("threshold_values 不能为空。")
+    if not target_top_k_values:
+        raise ValueError("target_top_k_values 不能为空。")
+    if not other_top_k_values:
+        raise ValueError("other_top_k_values 不能为空。")
+    if not other_margin_values:
+        raise ValueError("other_margin_values 不能为空。")
+    if not target_margin_values:
+        raise ValueError("target_margin_values 不能为空。")
+    if not quality_alpha_values:
+        raise ValueError("quality_alpha_values 不能为空。")
+    if not low_quality_threshold_boost_values:
+        raise ValueError("low_quality_threshold_boost_values 不能为空。")
+
+    best_params = {
+        "threshold": threshold_values[0],
+        "target_top_k": target_top_k_values[0],
+        "other_top_k": other_top_k_values[0],
+        "other_margin": other_margin_values[0],
+        "target_margin": target_margin_values[0],
+        "quality_alpha": quality_alpha_values[0],
+        "low_quality_threshold_boost": low_quality_threshold_boost_values[0],
+    }
+    best_accuracy = -1.0
+
+    for (
+        threshold,
+        target_top_k,
+        other_top_k,
+        other_margin,
+        target_margin,
+        quality_alpha,
+        low_quality_threshold_boost,
+    ) in product(
+        threshold_values,
+        target_top_k_values,
+        other_top_k_values,
+        other_margin_values,
+        target_margin_values,
+        quality_alpha_values,
+        low_quality_threshold_boost_values,
+    ):
+        predictions: list[int] = []
+        for query_index in range(labels.shape[0]):
+            keep_mask = torch.ones(labels.shape[0], dtype=torch.bool, device=labels.device)
+            keep_mask[query_index] = False
+            fold_predictions, _, _, _, _ = predict_open_set_with_quality_aware_scorer(
+                query_embeddings=embeddings[query_index : query_index + 1],
+                gallery_embeddings=embeddings[keep_mask],
+                gallery_labels=labels[keep_mask],
+                target_labels=target_labels,
+                other_label=other_label,
+                threshold=threshold,
+                target_top_k=target_top_k,
+                other_top_k=other_top_k,
+                other_margin=other_margin,
+                target_margin=target_margin,
+                quality_alpha=quality_alpha,
+                low_quality_threshold_boost=low_quality_threshold_boost,
+            )
+            predictions.append(int(fold_predictions.item()))
+
+        predictions_tensor = torch.tensor(predictions, device=labels.device, dtype=torch.long)
+        accuracy = (predictions_tensor == labels).float().mean().item()
+        if accuracy > best_accuracy:
+            best_params = {
+                "threshold": threshold,
+                "target_top_k": target_top_k,
+                "other_top_k": other_top_k,
+                "other_margin": other_margin,
+                "target_margin": target_margin,
+                "quality_alpha": quality_alpha,
+                "low_quality_threshold_boost": low_quality_threshold_boost,
             }
             best_accuracy = accuracy
 

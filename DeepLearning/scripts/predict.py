@@ -19,10 +19,12 @@ from dl_pipeline.data.datamodule import FaceDataModule
 from dl_pipeline.inference.prototype import (
     combine_embedding_sets,
     compute_class_prototypes,
+    predict_open_set_with_quality_aware_scorer,
     predict_open_set_with_richer_scorer,
     predict_open_set_with_exemplars,
     predict_open_set,
     predict_open_set_with_class_thresholds,
+    select_best_quality_aware_params_leave_one_out,
     select_best_richer_scorer_params_leave_one_out,
     select_best_exemplar_params,
     select_best_class_thresholds,
@@ -315,6 +317,99 @@ def _run_richer_open_set_inference(config, datamodule, model, test_df, output_ro
     return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
 
 
+def _run_quality_aware_open_set_inference(config, datamodule, model, test_df, output_root: Path):
+    inference_config = config.get("inference", {})
+    target_labels = inference_config.get("target_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    threshold_values = inference_config.get("threshold_values", [0.55])
+    target_top_k_values = inference_config.get("target_top_k_values", [3, 5])
+    other_top_k_values = inference_config.get("other_top_k_values", [3, 5])
+    other_margin_values = inference_config.get("other_margin_values", [0.02, 0.04, 0.06])
+    target_margin_values = inference_config.get("target_margin_values", [0.0, 0.01, 0.02])
+    quality_alpha_values = inference_config.get("quality_alpha_values", [0.0, 1.0, 2.0])
+    low_quality_threshold_boost_values = inference_config.get(
+        "low_quality_threshold_boost_values",
+        [0.0, 0.02, 0.04],
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model = model.to(device)
+
+    train_embeddings, train_labels = _collect_embeddings(model, datamodule.train_dataloader(), device)
+    val_embeddings, val_labels = _collect_embeddings(model, datamodule.val_dataloader(), device)
+    test_embeddings, test_ids = _collect_embeddings(model, datamodule.predict_dataloader(), device)
+    labeled_embeddings, labeled_labels = combine_embedding_sets(
+        [
+            (train_embeddings, train_labels),
+            (val_embeddings, val_labels),
+        ]
+    )
+
+    best_params, loo_accuracy = select_best_quality_aware_params_leave_one_out(
+        embeddings=labeled_embeddings,
+        labels=labeled_labels,
+        target_labels=target_labels,
+        other_label=other_label,
+        threshold_values=threshold_values,
+        target_top_k_values=target_top_k_values,
+        other_top_k_values=other_top_k_values,
+        other_margin_values=other_margin_values,
+        target_margin_values=target_margin_values,
+        quality_alpha_values=quality_alpha_values,
+        low_quality_threshold_boost_values=low_quality_threshold_boost_values,
+    )
+    (
+        test_predictions,
+        best_target_scores,
+        other_scores,
+        second_target_scores,
+        effective_thresholds,
+    ) = predict_open_set_with_quality_aware_scorer(
+        query_embeddings=test_embeddings,
+        gallery_embeddings=labeled_embeddings,
+        gallery_labels=labeled_labels,
+        target_labels=target_labels,
+        other_label=other_label,
+        threshold=float(best_params["threshold"]),
+        target_top_k=int(best_params["target_top_k"]),
+        other_top_k=int(best_params["other_top_k"]),
+        other_margin=float(best_params["other_margin"]),
+        target_margin=float(best_params["target_margin"]),
+        quality_alpha=float(best_params["quality_alpha"]),
+        low_quality_threshold_boost=float(best_params["low_quality_threshold_boost"]),
+    )
+
+    quality_metrics = {
+        "mode": "quality_aware_open_set",
+        "target_labels": target_labels,
+        "other_label": other_label,
+        "gallery_source": "all_labeled",
+        "selected_threshold": float(best_params["threshold"]),
+        "selected_target_top_k": int(best_params["target_top_k"]),
+        "selected_other_top_k": int(best_params["other_top_k"]),
+        "selected_other_margin": float(best_params["other_margin"]),
+        "selected_target_margin": float(best_params["target_margin"]),
+        "selected_quality_alpha": float(best_params["quality_alpha"]),
+        "selected_low_quality_threshold_boost": float(best_params["low_quality_threshold_boost"]),
+        "leave_one_out_accuracy": loo_accuracy,
+        "mean_test_best_target_score": float(best_target_scores.mean().item()),
+        "mean_test_other_score": float(other_scores.mean().item()),
+        "mean_test_second_target_score": float(second_target_scores.mean().item()),
+        "mean_test_effective_threshold": float(effective_thresholds.mean().item()),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(quality_metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred)
+        for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="加载最佳模型并生成 submission.csv。")
     parser.add_argument("--config", required=True)
@@ -380,6 +475,8 @@ def main() -> None:
         ordered_predictions = _run_exemplar_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "richer_open_set":
         ordered_predictions = _run_richer_open_set_inference(config, datamodule, model, test_df, output_root)
+    elif inference_mode == "quality_aware_open_set":
+        ordered_predictions = _run_quality_aware_open_set_inference(config, datamodule, model, test_df, output_root)
     else:
         outputs = trainer.predict(model, datamodule=datamodule)
 

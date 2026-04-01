@@ -6,10 +6,12 @@ from sklearn.model_selection import StratifiedKFold
 from dl_pipeline.inference.prototype import (
     combine_embedding_sets,
     compute_class_prototypes,
+    predict_open_set_with_quality_aware_scorer,
     predict_open_set_with_richer_scorer,
     predict_open_set_with_exemplars,
     predict_open_set,
     predict_open_set_with_class_thresholds,
+    select_best_quality_aware_params_leave_one_out,
     select_best_richer_scorer_params_leave_one_out,
     select_best_exemplar_params,
     select_best_threshold_crossval,
@@ -424,6 +426,133 @@ class PrototypeInferenceTests(unittest.TestCase):
         )
         self.assertAlmostEqual(best_accuracy, expected_scores[expected_combo])
 
+    def test_predict_open_set_with_quality_aware_scorer_uses_gallery_and_probe_quality(self):
+        gallery_embeddings = torch.tensor(
+            [
+                [2.0, 0.0],   # higher-quality class 1 exemplar
+                [0.8, 0.6],   # lower-quality class 1 exemplar
+                [0.0, 2.0],   # higher-quality class 2 exemplar
+                [0.0, 0.9],   # lower-quality class 2 exemplar
+                [1.4, 1.2],   # higher-quality other exemplar
+                [0.7, 0.7],   # lower-quality other exemplar
+            ]
+        )
+        gallery_labels = torch.tensor([1, 1, 2, 2, 0, 0])
+        query_embeddings = torch.tensor(
+            [
+                [1.7, 0.2],   # should be accepted as class 1
+                [0.35, 0.32], # low-quality ambiguous sample should be rejected
+            ]
+        )
+
+        predictions, best_target_scores, other_scores, second_target_scores, effective_thresholds = (
+            predict_open_set_with_quality_aware_scorer(
+                query_embeddings=query_embeddings,
+                gallery_embeddings=gallery_embeddings,
+                gallery_labels=gallery_labels,
+                target_labels=[1, 2],
+                other_label=0,
+                threshold=0.55,
+                target_top_k=2,
+                other_top_k=2,
+                other_margin=0.02,
+                target_margin=0.02,
+                quality_alpha=2.0,
+                low_quality_threshold_boost=0.08,
+            )
+        )
+
+        self.assertEqual(predictions.tolist(), [1, 0])
+        self.assertGreater(best_target_scores[0].item(), effective_thresholds[0].item())
+        self.assertGreater(effective_thresholds[1].item(), 0.55)
+        self.assertLess((best_target_scores[1] - other_scores[1]).item(), 0.02)
+        self.assertGreater(second_target_scores[1].item(), 0.0)
+
+    def test_select_best_quality_aware_params_leave_one_out_matches_manual_search(self):
+        embeddings = torch.tensor(
+            [
+                [2.0, 0.0],
+                [0.8, 0.6],
+                [0.0, 2.0],
+                [0.0, 0.9],
+                [1.4, 1.2],
+                [0.7, 0.7],
+            ]
+        )
+        labels = torch.tensor([1, 1, 2, 2, 0, 0])
+
+        best_params, best_accuracy = select_best_quality_aware_params_leave_one_out(
+            embeddings=embeddings,
+            labels=labels,
+            target_labels=[1, 2],
+            other_label=0,
+            threshold_values=[0.55],
+            target_top_k_values=[1, 2],
+            other_top_k_values=[1, 2],
+            other_margin_values=[0.0, 0.02],
+            target_margin_values=[0.0, 0.02],
+            quality_alpha_values=[0.0, 2.0],
+            low_quality_threshold_boost_values=[0.0, 0.08],
+        )
+
+        expected_scores = {}
+        for target_top_k in [1, 2]:
+            for other_top_k in [1, 2]:
+                for other_margin in [0.0, 0.02]:
+                    for target_margin in [0.0, 0.02]:
+                        for quality_alpha in [0.0, 2.0]:
+                            for low_quality_threshold_boost in [0.0, 0.08]:
+                                predictions = []
+                                for query_index in range(len(labels)):
+                                    query = embeddings[query_index : query_index + 1]
+                                    keep_mask = torch.ones(len(labels), dtype=torch.bool)
+                                    keep_mask[query_index] = False
+                                    gallery_embeddings = embeddings[keep_mask]
+                                    gallery_labels = labels[keep_mask]
+                                    fold_predictions, _, _, _, _ = (
+                                        predict_open_set_with_quality_aware_scorer(
+                                            query_embeddings=query,
+                                            gallery_embeddings=gallery_embeddings,
+                                            gallery_labels=gallery_labels,
+                                            target_labels=[1, 2],
+                                            other_label=0,
+                                            threshold=0.55,
+                                            target_top_k=target_top_k,
+                                            other_top_k=other_top_k,
+                                            other_margin=other_margin,
+                                            target_margin=target_margin,
+                                            quality_alpha=quality_alpha,
+                                            low_quality_threshold_boost=low_quality_threshold_boost,
+                                        )
+                                    )
+                                    predictions.append(int(fold_predictions.item()))
+                                predictions_tensor = torch.tensor(predictions)
+                                expected_scores[
+                                    (
+                                        0.55,
+                                        target_top_k,
+                                        other_top_k,
+                                        other_margin,
+                                        target_margin,
+                                        quality_alpha,
+                                        low_quality_threshold_boost,
+                                    )
+                                ] = (predictions_tensor == labels).float().mean().item()
+
+        expected_combo = max(expected_scores, key=expected_scores.get)
+        self.assertEqual(
+            best_params,
+            {
+                "threshold": expected_combo[0],
+                "target_top_k": expected_combo[1],
+                "other_top_k": expected_combo[2],
+                "other_margin": expected_combo[3],
+                "target_margin": expected_combo[4],
+                "quality_alpha": expected_combo[5],
+                "low_quality_threshold_boost": expected_combo[6],
+            },
+        )
+        self.assertAlmostEqual(best_accuracy, expected_scores[expected_combo])
 
 if __name__ == "__main__":
     unittest.main()
