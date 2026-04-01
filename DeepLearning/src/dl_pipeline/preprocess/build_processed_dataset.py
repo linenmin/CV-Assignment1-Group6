@@ -9,12 +9,15 @@ import pandas as pd
 from dl_pipeline.common.paths import ensure_dir
 from dl_pipeline.data.metadata import load_raw_metadata
 from dl_pipeline.face_detection.haar_detector import HaarFaceDetector
+from dl_pipeline.face_detection.mtcnn_detector import MTCNNFaceDetector
 
 
 def _build_detector(detector_name: str, cache_dir: str | Path, face_size: int):
-    if detector_name != "haar":
-        raise ValueError(f"当前第一版只实现了 haar 检测器，收到: {detector_name}")
-    return HaarFaceDetector(cache_dir=cache_dir, face_size=face_size)
+    if detector_name == "haar":
+        return HaarFaceDetector(cache_dir=cache_dir, face_size=face_size)
+    if detector_name == "mtcnn":
+        return MTCNNFaceDetector(cache_dir=cache_dir, face_size=face_size)
+    raise ValueError(f"当前不支持该检测器: {detector_name}")
 
 
 def _load_competition_image(npy_path: str | Path) -> np.ndarray:
