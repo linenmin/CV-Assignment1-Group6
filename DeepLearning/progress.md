@@ -294,3 +294,40 @@
   - 这次并没有学出稳定的“类别差异阈值”，最终反而退化成了更低的统一阈值
   - 相比 `exp_016`，预测中有 `136` 张从 `other` 被放宽为目标类，其中 `131` 张是 `0 -> 1`
   - 线上显著下降说明：当前 16 张验证集不足以支撑更高自由度的阈值拟合，后续应回到更稳健的全局阈值估计，而不是继续增加边界参数
+
+### Session 16
+
+- 已继续尝试“更稳健的全局阈值估计”：
+  - `exp_018_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype_cvglobal`
+- 这轮仍然不重训模型，继续复用 `exp_010` checkpoint，只把全局阈值搜索从单一 holdout 改成了训练集分层交叉验证平均。
+- 自动搜索结果为：
+  - `selected_threshold = 0.45`
+  - `crossval_mean_accuracy = 0.90625`
+  - 本地 `val_accuracy = 0.9375`
+- 当前已完成 submission 生成：
+  - 新 submission：`data/submissions/20260401_194047_exp_018_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype_cvglobal_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.85848`
+- 结论：
+  - 交叉验证并没有把阈值稳定在 `exp_016` 的最佳点 `0.55`，反而再次把边界放宽到 `0.45`
+  - 相比 `exp_016`，预测中有 `131` 张从 `other` 被放宽为目标类，其中 `126` 张是 `0 -> 1`
+  - 线上再次明显下降，说明当前最优阈值已经被 `exp_016` 充分证明，后续不应继续围绕更松的阈值搜索，而应固定最佳阈值后再回到模型改进
+
+### Session 17
+
+- 已把 `exp_016` 证明有效的全局阈值 `0.55` 固定下来，开始统一重评估已有模型的 embedding 质量，而不再继续搜索阈值。
+- 本轮新增四个固定协议实验：
+  - `exp_019_ir101_adaface_haar_10ep_laststage_ft_prototype_fixed055`
+  - `exp_020_ir101_adaface_haar_10ep_last2stage_ft_head1e4_prototype_fixed055`
+  - `exp_021_ir101_adaface_haar_10ep_last2stage_ft_head1e4_valloss_prototype_fixed055`
+  - `exp_022_ir101_adaface_haar_10ep_laststage_ft_lr1e5_degradeaug_prototype_fixed055`
+- 这轮全部复用现有 checkpoint，不重训模型，唯一目标是回答：
+  - 在统一 `prototype + threshold=0.55` 协议下，到底哪个模型的 embedding 最强？
+- 当前 Kaggle public score 为：
+  - `exp_019 = 0.91685`
+  - `exp_020 = 0.91519`
+  - `exp_021 = 0.91079`
+  - `exp_022 = 0.91024`
+- 这轮最重要的结论是：
+  - 固定阈值后，原来 softmax 下并不最优的 `exp_009` 反而成为当前最好模型；
+  - `exp_010/012/013/014` 之间的差异都很小，说明当前分数上限已经不主要由“再调一点学习率/monitor/增强”决定；
+  - 这也证明之前很多 softmax 结论会误导 embedding 质量判断，后续模型迭代必须直接在固定 open-set 协议下评估，而不是再回到 softmax submission

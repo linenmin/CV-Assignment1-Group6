@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from itertools import product
+
 import torch
 import torch.nn.functional as F
-from itertools import product
+from sklearn.model_selection import StratifiedKFold
 
 
 def _normalize_embeddings(embeddings: torch.Tensor) -> torch.Tensor:
@@ -99,6 +101,55 @@ def select_best_threshold(
         if accuracy > best_accuracy:
             best_threshold = threshold
             best_accuracy = accuracy
+    return best_threshold, best_accuracy
+
+
+def select_best_threshold_crossval(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    prototype_labels: list[int],
+    other_label: int,
+    threshold_values: list[float],
+    n_splits: int = 4,
+    random_state: int = 42,
+) -> tuple[float, float]:
+    if not threshold_values:
+        raise ValueError("threshold_values 不能为空。")
+    if n_splits < 2:
+        raise ValueError("n_splits 至少为 2。")
+
+    splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    best_threshold = threshold_values[0]
+    best_accuracy = -1.0
+
+    for threshold in threshold_values:
+        fold_accuracies: list[float] = []
+        for train_indices, val_indices in splitter.split(
+            embeddings.cpu().numpy(),
+            labels.cpu().numpy(),
+        ):
+            train_indices_tensor = torch.as_tensor(train_indices, dtype=torch.long)
+            val_indices_tensor = torch.as_tensor(val_indices, dtype=torch.long)
+            prototypes = compute_class_prototypes(
+                embeddings[train_indices_tensor],
+                labels[train_indices_tensor],
+                prototype_labels=prototype_labels,
+            )
+            predictions, _ = predict_open_set(
+                embeddings[val_indices_tensor],
+                prototypes=prototypes,
+                other_label=other_label,
+                threshold=threshold,
+            )
+            fold_accuracies.append(
+                (predictions == labels[val_indices_tensor]).float().mean().item()
+            )
+
+        mean_accuracy = sum(fold_accuracies) / len(fold_accuracies)
+        if mean_accuracy > best_accuracy:
+            best_threshold = threshold
+            best_accuracy = mean_accuracy
+
     return best_threshold, best_accuracy
 
 

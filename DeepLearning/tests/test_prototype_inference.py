@@ -1,11 +1,13 @@
 import unittest
 
 import torch
+from sklearn.model_selection import StratifiedKFold
 
 from dl_pipeline.inference.prototype import (
     compute_class_prototypes,
     predict_open_set,
     predict_open_set_with_class_thresholds,
+    select_best_threshold_crossval,
     select_best_threshold,
     select_best_class_thresholds,
 )
@@ -134,6 +136,58 @@ class PrototypeInferenceTests(unittest.TestCase):
 
         self.assertEqual(thresholds, {1: 0.75, 2: 0.80})
         self.assertAlmostEqual(accuracy, 1.0)
+
+    def test_select_best_threshold_crossval_uses_mean_fold_accuracy(self):
+        embeddings = torch.tensor(
+            [
+                [0.98, 0.02],
+                [0.80, 0.60],
+                [0.02, 0.98],
+                [0.60, 0.80],
+                [0.70, 0.68],
+                [0.68, 0.70],
+            ]
+        )
+        labels = torch.tensor([1, 1, 2, 2, 0, 0])
+        threshold_values = [0.70, 0.85, 0.95]
+
+        threshold, accuracy = select_best_threshold_crossval(
+            embeddings=embeddings,
+            labels=labels,
+            prototype_labels=[1, 2],
+            other_label=0,
+            threshold_values=threshold_values,
+            n_splits=2,
+            random_state=42,
+        )
+
+        splitter = StratifiedKFold(n_splits=2, shuffle=True, random_state=42)
+        expected_scores = {}
+        for candidate_threshold in threshold_values:
+            fold_accuracies = []
+            for train_indices, val_indices in splitter.split(embeddings.numpy(), labels.numpy()):
+                train_indices = torch.as_tensor(train_indices, dtype=torch.long)
+                val_indices = torch.as_tensor(val_indices, dtype=torch.long)
+                prototypes = compute_class_prototypes(
+                    embeddings[train_indices],
+                    labels[train_indices],
+                    prototype_labels=[1, 2],
+                )
+                predictions, _ = predict_open_set(
+                    embeddings[val_indices],
+                    prototypes=prototypes,
+                    other_label=0,
+                    threshold=candidate_threshold,
+                )
+                fold_accuracies.append(
+                    (predictions == labels[val_indices]).float().mean().item()
+                )
+            expected_scores[candidate_threshold] = sum(fold_accuracies) / len(fold_accuracies)
+
+        expected_threshold = max(expected_scores, key=expected_scores.get)
+        expected_accuracy = expected_scores[expected_threshold]
+        self.assertEqual(threshold, expected_threshold)
+        self.assertAlmostEqual(accuracy, expected_accuracy)
 
 
 if __name__ == "__main__":

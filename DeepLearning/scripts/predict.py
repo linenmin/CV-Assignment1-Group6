@@ -21,6 +21,7 @@ from dl_pipeline.inference.prototype import (
     predict_open_set,
     predict_open_set_with_class_thresholds,
     select_best_class_thresholds,
+    select_best_threshold_crossval,
     select_best_threshold,
 )
 from dl_pipeline.inference.submission import build_submission_dataframe, save_submission_dataframe
@@ -46,6 +47,9 @@ def _run_prototype_inference(config, datamodule, model, test_df, output_root: Pa
     other_label = inference_config.get("other_label", 0)
     threshold_values = inference_config.get("threshold_values", [0.7, 0.75, 0.8, 0.85, 0.9, 0.95])
     threshold_values_by_class = inference_config.get("threshold_values_by_class")
+    threshold_selection = inference_config.get("threshold_selection", "val")
+    crossval_splits = inference_config.get("crossval_splits", 4)
+    crossval_random_state = inference_config.get("crossval_random_state", 42)
 
     device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
     model = model.to(device)
@@ -55,7 +59,41 @@ def _run_prototype_inference(config, datamodule, model, test_df, output_root: Pa
     test_embeddings, test_ids = _collect_embeddings(model, datamodule.predict_dataloader(), device)
 
     prototypes = compute_class_prototypes(train_embeddings, train_labels, prototype_labels=prototype_labels)
-    if threshold_values_by_class:
+    if threshold_selection == "crossval_global":
+        threshold, cv_mean_accuracy = select_best_threshold_crossval(
+            embeddings=train_embeddings,
+            labels=train_labels,
+            prototype_labels=prototype_labels,
+            other_label=other_label,
+            threshold_values=threshold_values,
+            n_splits=crossval_splits,
+            random_state=crossval_random_state,
+        )
+        val_predictions, _ = predict_open_set(
+            val_embeddings,
+            prototypes=prototypes,
+            other_label=other_label,
+            threshold=threshold,
+        )
+        val_accuracy = (val_predictions == val_labels).float().mean().item()
+        test_predictions, _ = predict_open_set(
+            test_embeddings,
+            prototypes=prototypes,
+            other_label=other_label,
+            threshold=threshold,
+        )
+        prototype_metrics = {
+            "mode": "prototype",
+            "threshold_mode": "global_crossval",
+            "prototype_labels": prototype_labels,
+            "other_label": other_label,
+            "selected_threshold": threshold,
+            "crossval_mean_accuracy": cv_mean_accuracy,
+            "val_accuracy": val_accuracy,
+            "crossval_splits": crossval_splits,
+            "crossval_random_state": crossval_random_state,
+        }
+    elif threshold_values_by_class:
         normalized_threshold_values_by_class = {
             int(label): values for label, values in threshold_values_by_class.items()
         }
