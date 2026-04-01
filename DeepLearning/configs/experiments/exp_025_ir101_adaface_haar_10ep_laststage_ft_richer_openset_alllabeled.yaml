@@ -1,0 +1,38 @@
+experiment_name: exp_025_ir101_adaface_haar_10ep_laststage_ft_richer_openset_alllabeled
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+
+model:
+  family: cvlface
+  backbone_name: ir101
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_ir101_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: true
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 10
+  learning_rate: 0.0003
+  backbone_learning_rate: 0.00003
+  weight_decay: 0.0001
+  early_stopping_patience: 20
+
+augmentation:
+  use_horizontal_flip: false
+
+inference:
+  mode: richer_open_set
+  target_labels: [1, 2]
+  other_label: 0
+  threshold_values: [0.53, 0.55, 0.57]
+  target_top_k_values: [3, 5, 7]
+  other_top_k_values: [3, 5, 7]
+  other_margin_values: [0.0, 0.02, 0.04, 0.06]
+  target_margin_values: [0.0, 0.01, 0.02, 0.03]

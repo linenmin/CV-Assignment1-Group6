@@ -464,3 +464,45 @@
 - 因而这四轮共同给出的判断是：
   - 当前最值得优化的已经不是“再调训练细节”，而是**把 open-set 决策从“单 centroid + 单阈值”升级成更强的 gallery / multi-prototype / negative-aware 推理**；
   - 只有这种层级的方法变化，才更有可能带来接近 `0.97` 所需的量级提升。
+
+### `exp_023` 当前结果
+
+- `exp_023_ir101_adaface_haar_10ep_laststage_ft_exemplar_knn_margin` 继续复用当前最强 embedding checkpoint `exp_009`，不重训模型，只把推理从 `single prototype` 升级为：
+  - exemplar gallery
+  - top-k nearest-neighbor
+  - target-vs-other margin rejection
+- 这条线原本的动机是合理的：
+  - 单 centroid 会丢掉局部结构；
+  - exemplar / kNN 理论上更能保留姿态、光照、表情等多模态信息；
+  - margin 也能把“既像目标又像 other”的样本拒识掉。
+- 但当前自动搜索结果是：
+  - `selected_top_k = 1`
+  - `selected_margin = 0.0`
+  - `selected_threshold = 0.55`
+  - 本地 `val_accuracy = 0.9375`
+- 这意味着这轮并没有真正学到“更稳的 kNN + margin”规则，而是退化成了：
+  - **1-NN**
+  - **无 margin**
+  - **只保留固定阈值**
+- Kaggle public score 为 `0.84911`，相比 `exp_019 = 0.91685` 出现明显退化。
+- 从预测分布变化看，问题非常明确：
+  - `exp_019` 预测分布：`{0: 1091, 1: 343, 2: 382}`
+  - `exp_023` 预测分布：`{0: 878, 1: 514, 2: 424}`
+  - 一共有 `215` 张测试图发生变化：
+    - `172` 张从 `0 -> 1`
+    - `42` 张从 `0 -> 2`
+    - 只有 `1` 张从 `1 -> 0`
+- 也就是说，这轮几乎完全是在大规模放松拒识，把原本判成 `other` 的样本大量吸进目标类。
+- 这说明什么：
+  1. **1-NN 太不稳。**
+     - 它高度依赖单张 exemplar，容易被噪声样本、偶然相似样本、异常姿态样本牵着走；
+     - 在人脸开放集任务里，这种不稳定性会直接表现为“误接收 other”。
+  2. **当前 16 张验证集再次失效。**
+     - 它把 `1-NN + 0 margin` 视为与更稳规则同样好；
+     - 但线上说明这是明显错误方向。
+  3. **问题不在“exemplar 思路一定错”，而在“让验证集自由选成 1-NN + 无抑制”这个结果错了。**
+     - exemplar 要想有效，必须配合更强的聚合或更强的负类竞争，而不能退化成最脆弱的单样本最近邻。
+- 所以这轮实验带来的更新结论是：
+  - “multi-exemplar”本身仍然值得保留；
+  - 但下一步不能再让搜索空间包含 `top_k = 1, margin = 0` 这种明显过松、过脆弱的组合；
+  - 更靠谱的方向是：**保留 exemplar 信息，但用更稳健的相似度聚合和更强的 other-aware margin，而不是直接做裸 1-NN。**

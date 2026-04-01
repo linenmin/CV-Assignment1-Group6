@@ -331,3 +331,23 @@
   - 固定阈值后，原来 softmax 下并不最优的 `exp_009` 反而成为当前最好模型；
   - `exp_010/012/013/014` 之间的差异都很小，说明当前分数上限已经不主要由“再调一点学习率/monitor/增强”决定；
   - 这也证明之前很多 softmax 结论会误导 embedding 质量判断，后续模型迭代必须直接在固定 open-set 协议下评估，而不是再回到 softmax submission
+
+### Session 18
+
+- 已开始尝试比单 centroid 更强的推理规则：
+  - `exp_023_ir101_adaface_haar_10ep_laststage_ft_exemplar_knn_margin`
+- 这轮继续复用 `exp_009` checkpoint，不重训模型，只把推理方式从：
+  - `single prototype + fixed threshold`
+  - 升级为 `exemplar gallery + top-k nearest neighbor + target-vs-other margin rejection`
+- 自动搜索结果为：
+  - `selected_threshold = 0.55`
+  - `selected_top_k = 1`
+  - `selected_margin = 0.0`
+  - 本地 `val_accuracy = 0.9375`
+- 当前已完成 submission 生成：
+  - 新 submission：`data/submissions/20260401_201410_exp_023_ir101_adaface_haar_10ep_laststage_ft_exemplar_knn_margin_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.84911`
+- 结论：
+  - 这轮本地选参最后退化成了 `1-NN + 0 margin`，没有真正学到“更稳的近邻投票”或“更强的 other 抑制”
+  - 相比 `exp_019`，预测中有 `215` 张发生变化，其中 `214` 张把原本的 `other` 放宽为目标类
+  - 线上明显下降说明：单样本最近邻对噪声样本极其敏感，当前最有效的方向不是直接上 1-NN，而是继续保留原型式稳定性，同时把 `other` 作为显式竞争项引入更稳健的 margin / aggregation 规则
