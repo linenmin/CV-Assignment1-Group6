@@ -15,6 +15,14 @@
 - 第一版验证集最佳准确率：`0.6944444179534912`
 - 第一版 Kaggle public score：`0.61178`
 
+当前也已经接入第二条更强的模型路线：
+
+- `CVLFace / AdaFace` 人脸识别专用预训练 backbone
+- 已验证可在当前工程中直接训练 3 类分类头
+- 当前实验配置示例：
+  - `configs/experiments/exp_007_ir101_adaface_haar_10ep.yaml`
+  - `configs/experiments/exp_008_ir101_adaface_mtcnn_10ep.yaml`
+
 ## 1. 从 Git 仓库开始
 
 项目仓库：
@@ -207,6 +215,14 @@ data/processed/exp_001_faces_224/
 - `train_metadata.csv`
 - `test_metadata.csv`
 
+如果你要走更强的人脸识别主线，也可以直接使用：
+
+```bash
+python scripts/prepare_faces.py --config configs/experiments/exp_008_ir101_adaface_mtcnn_10ep.yaml
+```
+
+这会改用 `MTCNN + 5 点对齐` 生成更适合 `AdaFace` 的 `112x112` 标准化人脸。
+
 ### 7.3 生成固定训练/验证划分
 
 ```bash
@@ -296,11 +312,18 @@ data/submissions/
 第一版是 baseline，不是最终形态。后续优先级建议：
 
 1. 把 `HAAR` 检测器换成更稳的人脸检测器
-2. 把 `resnet18` 换成更强的 backbone
+2. 优先尝试“人脸识别专用预训练 backbone”，例如 `IR101 + AdaFace`
 3. 调整数据增强强度
 4. 试 `batch size / lr / epoch`
 5. 看是否需要 class weighting 或 sampler
 6. 做 TTA 或简单 ensemble
+
+当前更强的主线组合已经不是 `resnet18 + HAAR`，而是：
+
+- `IR101 + AdaFace`
+- `112x112`
+- `face` 归一化
+- 更适合人脸识别的检测/对齐方案，例如 `MTCNN + 5 点对齐`
 
 ## 11. 实验记录怎么维护
 
