@@ -19,11 +19,13 @@ class FaceClassifierModule(L.LightningModule):
         pretrained: bool,
         dropout: float,
         learning_rate: float,
+        backbone_learning_rate: float | None,
         weight_decay: float,
         scheduler_name: str,
         max_epochs: int,
         pretrained_repo_id: str | None = None,
         freeze_backbone: bool = False,
+        unfreeze_last_stage: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -35,6 +37,7 @@ class FaceClassifierModule(L.LightningModule):
             dropout=dropout,
             pretrained_repo_id=pretrained_repo_id,
             freeze_backbone=freeze_backbone,
+            unfreeze_last_stage=unfreeze_last_stage,
         )
         self.criterion = nn.CrossEntropyLoss()
         self.val_acc = MulticlassAccuracy(num_classes=num_classes)
@@ -71,10 +74,39 @@ class FaceClassifierModule(L.LightningModule):
         preds = torch.argmax(logits, dim=1)
         return {"ids": sample_ids, "preds": preds}
 
+    def _build_optimizer_param_groups(self):
+        backbone_learning_rate = self.hparams.backbone_learning_rate
+        if backbone_learning_rate is None or not hasattr(self.model, "backbone"):
+            return [
+                {
+                    "params": [parameter for parameter in self.parameters() if parameter.requires_grad],
+                    "lr": self.hparams.learning_rate,
+                }
+            ]
+
+        backbone_params = [parameter for parameter in self.model.backbone.parameters() if parameter.requires_grad]
+        if not backbone_params:
+            return [
+                {
+                    "params": [parameter for parameter in self.parameters() if parameter.requires_grad],
+                    "lr": self.hparams.learning_rate,
+                }
+            ]
+
+        backbone_param_ids = {id(parameter) for parameter in backbone_params}
+        head_params = [
+            parameter
+            for parameter in self.parameters()
+            if parameter.requires_grad and id(parameter) not in backbone_param_ids
+        ]
+        return [
+            {"params": backbone_params, "lr": backbone_learning_rate},
+            {"params": head_params, "lr": self.hparams.learning_rate},
+        ]
+
     def configure_optimizers(self):
         optimizer = AdamW(
-            [parameter for parameter in self.parameters() if parameter.requires_grad],
-            lr=self.hparams.learning_rate,
+            self._build_optimizer_param_groups(),
             weight_decay=self.hparams.weight_decay,
         )
         if self.hparams.scheduler_name == "cosine":

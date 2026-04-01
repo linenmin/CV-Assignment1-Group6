@@ -54,11 +54,13 @@ def main() -> None:
         pretrained=config["model"]["pretrained"],
         dropout=config["model"]["dropout"],
         learning_rate=config["train"]["learning_rate"],
+        backbone_learning_rate=config["train"].get("backbone_learning_rate"),
         weight_decay=config["train"]["weight_decay"],
         scheduler_name=config["train"]["scheduler"],
         max_epochs=config["train"]["max_epochs"],
         pretrained_repo_id=config["model"].get("pretrained_repo_id"),
         freeze_backbone=config["model"].get("freeze_backbone", False),
+        unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
     )
 
     checkpoint_callback = ModelCheckpoint(

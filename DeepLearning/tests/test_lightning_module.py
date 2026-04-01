@@ -1,0 +1,50 @@
+import unittest
+from unittest.mock import patch
+
+import torch
+from torch import nn
+
+from dl_pipeline.training.lightning_module import FaceClassifierModule
+
+
+class DummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = nn.Linear(4, 4)
+        self.classifier = nn.Linear(4, 3)
+
+    def forward(self, images):
+        return self.classifier(self.backbone(images))
+
+
+class LightningModuleOptimizerTests(unittest.TestCase):
+    @patch("dl_pipeline.training.lightning_module.build_classifier")
+    def test_configure_optimizers_separates_backbone_learning_rate(self, mock_build_classifier):
+        mock_build_classifier.return_value = DummyModel()
+
+        module = FaceClassifierModule(
+            model_family="cvlface",
+            backbone_name="ir101",
+            num_classes=3,
+            pretrained=True,
+            dropout=0.2,
+            learning_rate=3e-4,
+            backbone_learning_rate=3e-5,
+            weight_decay=1e-4,
+            scheduler_name="cosine",
+            max_epochs=10,
+            pretrained_repo_id="minchul/cvlface_adaface_ir101_webface4m",
+            freeze_backbone=False,
+            unfreeze_last_stage=False,
+        )
+
+        optimizer_bundle = module.configure_optimizers()
+        optimizer = optimizer_bundle["optimizer"]
+
+        self.assertEqual(len(optimizer.param_groups), 2)
+        self.assertEqual(optimizer.param_groups[0]["lr"], 3e-5)
+        self.assertEqual(optimizer.param_groups[1]["lr"], 3e-4)
+
+
+if __name__ == "__main__":
+    unittest.main()

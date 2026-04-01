@@ -108,3 +108,29 @@
   - `MTCNN + 5 点对齐` 没有超过 `exp_007` 的 `0.62720`；
   - 它也没有明显劣化到失效，而是回到了接近早期 `resnet18` 基线的区间；
   - 这说明当前主瓶颈已经不再是“检测器够不够新”，而更可能是任务建模方式本身。
+
+### Session 7
+
+- 已在 `exp_007` 主线上继续做低风险微调升级，新增实验：
+  - `exp_009_ir101_adaface_haar_10ep_laststage_ft`
+- 本次唯一核心变量是训练策略：
+  - 继续使用 `IR101 + AdaFace`
+  - 继续使用 `HAAR`
+  - 继续使用 `112x112`
+  - 从“冻结 backbone，只训练分类头”升级为“仅解冻最后一个 stage，并为 backbone 使用更小学习率”
+- 为支持该实验，本轮工程改动包括：
+  - `cvlface` 分类器支持只解冻最后一个 stage
+  - 优化器支持 backbone 与分类头使用不同学习率
+  - 新增对应单元测试
+- 训练过程中发现部分微调对资源更敏感：
+  - 初始 `batch_size=16` 会导致本机资源压力过高
+  - 调整为 `batch_size=8` 后训练稳定完成
+- 该实验已经完成训练与预测：
+  - 最佳 checkpoint：`outputs/exp_009_ir101_adaface_haar_10ep_laststage_ft/checkpoints/best.ckpt`
+  - 本地验证集最佳准确率：`0.9444444179534912`
+  - 新 submission：`data/submissions/20260401_164220_exp_009_ir101_adaface_haar_10ep_laststage_ft_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.78799`。
+- 结论：
+  - 这次从 `0.62720` 提升到 `0.78799`，说明“人脸专用预训练 backbone + 轻量部分微调”是当前最有效的主线；
+  - 提升的关键不是继续换检测器，而是让强预训练人脸 backbone 对比赛分布做适度适配；
+  - 这一结果也说明，开发阶段仍应保留验证集作为护栏，但真正决定方向的仍然是 Kaggle 分数。
