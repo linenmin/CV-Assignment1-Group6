@@ -1,0 +1,21 @@
+experiment_name: exp_005_resnet18_haar_10ep_nohflip
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+
+model:
+  backbone_name: resnet18
+  pretrained: true
+  dropout: 0.2
+
+train:
+  batch_size: 16
+  max_epochs: 10
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  early_stopping_patience: 20
+
+augmentation:
+  use_horizontal_flip: false
