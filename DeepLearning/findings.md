@@ -506,3 +506,89 @@
   - “multi-exemplar”本身仍然值得保留；
   - 但下一步不能再让搜索空间包含 `top_k = 1, margin = 0` 这种明显过松、过脆弱的组合；
   - 更靠谱的方向是：**保留 exemplar 信息，但用更稳健的相似度聚合和更强的 other-aware margin，而不是直接做裸 1-NN。**
+
+### `exp_024` 当前结果
+
+- `exp_024_ir101_adaface_haar_10ep_laststage_ft_prototype_fixed055_alllabeled` 继续复用 `exp_009` checkpoint，不重训模型，只把 `exp_019` 的 prototype gallery 从训练子集扩展到 `all 80 labeled`。
+- 这是一个很干净的验证：如果当前瓶颈只是“gallery 样本覆盖不足”，那把 `val` 一并纳入 gallery 至少应该改变部分测试预测。
+- 但实际结果是：
+  - `exp_024` 的 submission 与 `exp_019` **逐行完全一致**
+  - 差异条数为 `0`
+- 这个结果非常关键，因为它说明：
+  1. 当前问题不在“gallery 点太少”，而在“如何聚合这些点”；  
+  2. 在 `single prototype + fixed threshold 0.55` 这条规则下，把更多样本压成每类一个均值，并不会增加有效判别信息；  
+  3. 所以如果后续还要继续利用 `all 80 labeled`，重点应放在更丰富的聚合/决策规则上，而不是继续坚持单 centroid。
+
+### `exp_025` 当前结果
+
+- `exp_025_ir101_adaface_haar_10ep_laststage_ft_richer_openset_alllabeled` 继续复用 `exp_009` checkpoint，不重训模型，在 `all 80 labeled` 上引入更丰富的开放集打分：
+  - `target top-k mean`
+  - `other top-k mean`
+  - `best-vs-second target margin`
+- 这条线的理论动机是对的：当前单阈值规则太粗，确实缺少“目标与 other 的竞争关系”和“两个目标类之间的分差”。
+- 但当前 leave-one-out 搜索结果为：
+  - `selected_threshold = 0.53`
+  - `selected_target_top_k = 3`
+  - `selected_other_top_k = 3`
+  - `selected_other_margin = 0.0`
+  - `selected_target_margin = 0.0`
+  - `leave_one_out_accuracy = 0.9125`
+- 也就是说，这轮最终依然退化成了：  
+  - 更低阈值  
+  - 无 margin  
+  - 只比 `exp_019` 略微放松一点拒识  
+- 相比 `exp_019`，它只改了 `8` 张预测，几乎全部是在把 `other` 轻微往目标类放宽。
+- 因而这轮给出的判断是：
+  1. richer scorer 这个方向并没有错，但当前这组新特征还不够强；  
+  2. 如果自动搜索最后仍然把两个 margin 都压到 `0`，说明这些新特征并没有真正改变决策边界的性质；  
+  3. 这类“只比 `exp_019` 轻微更松一点”的规则，不值得占用 Kaggle 日提交配额。
+
+### `exp_026` 当前结果
+
+- `exp_026_ir101_adaface_haar_10ep_quality_aware_openset_alllabeled` 尝试把 `AdaFace` 的质量信息显式引入推理：
+  - quality-weighted gallery aggregation
+  - low-quality probe threshold boost
+- 这是一个合理方向，因为 `AdaFace` 的设计本身就强调质量感知，按理说 embedding norm 应当可以给开放集拒识提供额外帮助。
+- 但当前搜索结果非常直接：
+  - `selected_quality_alpha = 0.0`
+  - `selected_low_quality_threshold_boost = 0.0`
+  - `leave_one_out_accuracy = 0.9125`
+- 这意味着：**在当前实现和当前 embedding 上，quality-aware inference 最终没有被选中。**
+- 它相对 `exp_019` 只改了 `12` 张预测，而且主要是轻微的 `0 -> 1` 放宽。
+- 所以这轮实验最重要的不是“有没有涨一点”，而是给出了一个更硬的负结论：
+  1. 质量信息在当前 pipeline 下没有转化成有效的新判别信号；  
+  2. 当前最缺的不是“再加一个轻量质量特征”，而是**真正改变决策函数形态**；  
+  3. 因为这轮没有学出质量感知行为，所以它不值得继续消耗 Kaggle 配额验证。
+
+### `exp_027` 当前结果
+
+- `exp_027_ir101_adaface_haar_10ep_verifier_openset_alllabeled` 尝试把问题改写成两个 one-vs-rest verifier：
+  - Jesse verifier
+  - Mila verifier
+  - 各自阈值 + reject
+- 这条线的出发点也很合理：
+  - 与其把任务当作闭集三分类，不如把它拆成两个“是否属于目标人”的验证问题；
+  - 这更接近开放集识别的真实结构。
+- 但当前 leave-one-out 搜索结果是：
+  - `selected_target_top_k = 3`
+  - `selected_negative_top_k = 3`
+  - `selected_thresholds_by_class = {1: 0.06, 2: 0.06}`
+  - `leave_one_out_accuracy = 0.9375`
+- 这个阈值已经暴露出问题：它太低，等于在大幅放宽接收边界。
+- 相比 `exp_019`：
+  - 一共有 `119` 张预测发生变化
+  - 全部是把 `other` 放宽为目标类：
+    - `52` 张 `0 -> 1`
+    - `67` 张 `0 -> 2`
+- 这和 `exp_017 / exp_018 / exp_023` 的失败模式高度一致。
+- 所以这轮更新后的判断是：
+  1. verifier-style 思路本身可能仍有理论价值，但当前实现版并没有解决核心问题；  
+  2. 在现有 embedding 上，leave-one-out 依然会系统性奖励更松的接受边界；  
+  3. 因而 verifier 方向在“当前实现版本”上可先视为负例，不值得继续用 Kaggle 提交去验证。
+
+### 当前综合判断
+
+- 经过 `exp_024 ~ exp_027` 这四轮离线实验后，可以把现阶段结论收紧成：
+  1. `exp_019 = 0.91685` 仍然是当前最强、最稳定、最值得保护的线上基线；  
+  2. 小幅改造 open-set scorer，如果最终表现成“阈值更低、更多 `0 -> 1/2`”，基本都不值得提交；  
+  3. 当前最值得投入的下一个方向，不应该是继续微调 scorer，而应该是**更大步长的方法变化**，例如 score/model fusion，或者训练目标与开放集推理更一致的 metric-learning 式建模。

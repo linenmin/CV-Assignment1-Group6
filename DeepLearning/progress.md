@@ -351,3 +351,80 @@
   - 这轮本地选参最后退化成了 `1-NN + 0 margin`，没有真正学到“更稳的近邻投票”或“更强的 other 抑制”
   - 相比 `exp_019`，预测中有 `215` 张发生变化，其中 `214` 张把原本的 `other` 放宽为目标类
   - 线上明显下降说明：单样本最近邻对噪声样本极其敏感，当前最有效的方向不是直接上 1-NN，而是继续保留原型式稳定性，同时把 `other` 作为显式竞争项引入更稳健的 margin / aggregation 规则
+
+### Session 19
+
+- 已测试“全部标注样本做 gallery，但仍保留最稳的单 prototype 规则”：
+  - `exp_024_ir101_adaface_haar_10ep_laststage_ft_prototype_fixed055_alllabeled`
+- 这轮继续复用 `exp_009` checkpoint，不重训模型，只把 gallery 从 `train split` 扩展到 `all 80 labeled`。
+- 当前已完成 submission 生成：
+  - 新 submission：`data/submissions/20260401_202654_exp_024_ir101_adaface_haar_10ep_laststage_ft_prototype_fixed055_alllabeled_submission.csv`
+- 本地最关键的结论是：
+  - `exp_024` 的 submission 与 `exp_019` **逐行完全一致**
+  - 差异条数为 `0`
+- 结论：
+  - 在 `single prototype + fixed threshold 0.55` 这个规则下，把 `val` 并入 gallery 没有带来任何变化；
+  - 当前瓶颈不在“gallery 样本总数不够”，而在“所有样本被压成每类一个均值后，新增样本信息被抹平”。
+
+### Session 20
+
+- 已继续测试更丰富的开放集打分规则：
+  - `exp_025_ir101_adaface_haar_10ep_laststage_ft_richer_openset_alllabeled`
+- 这轮继续复用 `exp_009` checkpoint，不重训模型，只在 `all 80 labeled` 上做 leave-one-out 选参，加入：
+  - `target top-k mean`
+  - `other top-k mean`
+  - `best-vs-second target margin`
+- 当前已完成 submission 生成：
+  - 新 submission：`data/submissions/20260401_203557_exp_025_ir101_adaface_haar_10ep_laststage_ft_richer_openset_alllabeled_submission.csv`
+- 自动搜索结果为：
+  - `selected_threshold = 0.53`
+  - `selected_target_top_k = 3`
+  - `selected_other_top_k = 3`
+  - `selected_other_margin = 0.0`
+  - `selected_target_margin = 0.0`
+  - `leave_one_out_accuracy = 0.9125`
+- 结论：
+  - 这轮虽然形式上更复杂，但最后依然退化成了“低阈值 + 无 margin”的更松接收规则；
+  - 相对 `exp_019` 只改了 `8` 张预测，信息量不足，不能视为值得优先消耗 Kaggle 配额的高价值实验。
+
+### Session 21
+
+- 已尝试把 `AdaFace` 的质量信息显式引入推理：
+  - `exp_026_ir101_adaface_haar_10ep_quality_aware_openset_alllabeled`
+- 这轮继续复用 `exp_009` checkpoint，不重训模型，在 `exp_025` 的基础上新增：
+  - quality-weighted gallery aggregation
+  - low-quality probe threshold boost
+- 当前已完成 submission 生成：
+  - 新 submission：`data/submissions/20260401_210643_exp_026_ir101_adaface_haar_10ep_quality_aware_openset_alllabeled_submission.csv`
+- 自动搜索结果为：
+  - `selected_threshold = 0.53`
+  - `selected_target_top_k = 3`
+  - `selected_other_top_k = 3`
+  - `selected_other_margin = 0.02`
+  - `selected_quality_alpha = 0.0`
+  - `selected_low_quality_threshold_boost = 0.0`
+  - `leave_one_out_accuracy = 0.9125`
+- 结论：
+  - 真正代表质量感知的两项参数都被选成了 `0.0`；
+  - 说明在当前实现和当前 embedding 上，quality-aware inference 没有提供有效增益；
+  - 相对 `exp_019` 只改了 `12` 张，而且主要是 `0 -> 1` 的轻微放松，不值得单独提交 Kaggle。
+
+### Session 22
+
+- 已继续尝试把问题重构成两个 one-vs-rest verifier：
+  - `exp_027_ir101_adaface_haar_10ep_verifier_openset_alllabeled`
+- 这轮继续复用 `exp_009` checkpoint，不重训模型，在 `all 80 labeled` 上做 leave-one-out 搜索：
+  - `target_top_k`
+  - `negative_top_k`
+  - 两个 verifier 各自阈值
+- 当前已完成 submission 生成：
+  - 新 submission：`data/submissions/20260401_212349_exp_027_ir101_adaface_haar_10ep_verifier_openset_alllabeled_submission.csv`
+- 自动搜索结果为：
+  - `selected_target_top_k = 3`
+  - `selected_negative_top_k = 3`
+  - `selected_thresholds_by_class = {1: 0.06, 2: 0.06}`
+  - `leave_one_out_accuracy = 0.9375`
+- 结论：
+  - verifier 方案在当前实现下学出了过低阈值，导致相对 `exp_019` 有 `119` 张预测变化，而且全是把 `other` 放宽为目标类；
+  - 这和此前多轮掉分实验的错误模式高度一致；
+  - 因而它虽然完成了代码验证，但不值得占用 Kaggle 日提交配额。
