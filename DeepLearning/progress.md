@@ -154,3 +154,143 @@
   - 从 `0.78799` 提升到 `0.87885`，说明 backbone 微调幅度进一步收敛后，测试集表现继续明显改善；
   - 当前最优方向已经非常明确：不是“更强更猛”的微调，而是“更温和、更受控”的微调；
   - 下一步应继续围绕这条主线优化模型选择标准，而不是回到 detector、增强或更大 backbone 的大改路线。
+
+### Session 9
+
+- 已把训练阶段的模型选择逻辑从固定硬编码改成可配置：
+  - `train.monitor_metric`
+  - `train.monitor_mode`
+- 默认行为保持不变：
+  - 默认仍然使用 `val_acc / max`
+  - 只有实验配置显式覆盖时，才切到其他指标
+- 为此新增：
+  - `src/dl_pipeline/training/monitoring.py`
+  - `tests/test_monitoring.py`
+  - `tests/test_lightning_module.py` 中的自定义 monitor 测试
+- 已完成本轮实验：
+  - `exp_011_ir101_adaface_haar_10ep_laststage_ft_lr1e5_valloss`
+- 该实验与 `exp_010` 保持完全相同的 backbone、学习率和微调范围，仅把选模指标从 `val_acc` 切换到 `val_loss`。
+- 当前已完成训练与预测：
+  - 最佳 checkpoint：`outputs/exp_011_ir101_adaface_haar_10ep_laststage_ft_lr1e5_valloss/checkpoints/best.ckpt`
+  - 本地最佳 `val_loss`：`0.1152695044875145`
+  - 对应 epoch 的 `val_acc`：`1.0`
+  - 新 submission：`data/submissions/20260401_173902_exp_011_ir101_adaface_haar_10ep_laststage_ft_lr1e5_valloss_submission.csv`
+- 当前状态：
+  - 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.85572`
+  - 结论：这次切换到 `val_loss` 选模并没有超过 `exp_010` 的 `0.87885`，说明在“只解冻最后一个 stage”这条线上，`exp_010` 原本就已经选到了接近最优的 checkpoint，选模指标不是当前主要增益来源
+
+### Session 10
+
+- 已为 `CVLFace` 主线补充更通用的分阶段解冻能力：
+  - 新增 `model.unfreeze_stage_count`
+  - 兼容原有 `unfreeze_last_stage`
+  - 保持默认行为不变
+- 已完成本轮实验：
+  - `exp_012_ir101_adaface_haar_10ep_last2stage_ft_head1e4`
+- 该实验相对 `exp_010` 的核心变化是：
+  - 从只解冻最后 `1` 个 stage 扩展到解冻最后 `2` 个 stage
+  - 分类头学习率从 `3e-4` 降到 `1e-4`
+  - backbone 学习率设置为 `5e-6`
+  - 由于资源压力上升，`batch_size` 收缩到 `4`
+- 当前已完成训练与预测：
+  - 最佳 checkpoint：`outputs/exp_012_ir101_adaface_haar_10ep_last2stage_ft_head1e4/checkpoints/best.ckpt`
+  - 本地最佳 `val_loss`：`0.18338939547538757`
+  - 对应 `val_acc`：`0.9444444179534912`
+  - 新 submission：`data/submissions/20260401_175943_exp_012_ir101_adaface_haar_10ep_last2stage_ft_head1e4_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.87775`
+- 结论：
+  - 线上几乎追平 `exp_010` 的 `0.87885`，只差 `0.00110`
+  - 这说明“两层解冻”并没有把模型明显带偏，反而说明这条线仍有潜力
+  - 但当前这组超参数并没有真正超过 `exp_010`，因此还不能视为新的最优主线
+
+### Session 11
+
+- 已在 `exp_012` 的基础上做一次更干净的选模验证：
+  - `exp_013_ir101_adaface_haar_10ep_last2stage_ft_head1e4_valloss`
+- 这轮不再改结构和学习率，只改 checkpoint 选择标准：
+  - 从 `val_acc / max` 切到 `val_loss / min`
+- 当前已完成训练与预测：
+  - 最佳 checkpoint：`outputs/exp_013_ir101_adaface_haar_10ep_last2stage_ft_head1e4_valloss/checkpoints/best.ckpt`
+  - 本地最佳 `val_loss`：`0.1475604921579361`
+  - 对应 `val_acc`：`0.9444444179534912`
+  - 新 submission：`data/submissions/20260401_182258_exp_013_ir101_adaface_haar_10ep_last2stage_ft_head1e4_valloss_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.87720`
+- 结论：
+  - 在“两层解冻”这条线上，切换到 `val_loss` 选模确实显著改善了本地 `val_loss`
+  - 但线上分数从 `0.87775` 变为 `0.87720`，并没有转化为 Kaggle 提升
+  - 这说明当前瓶颈已经不是“选模指标选错了”，而是“两层解冻 + 当前学习率组合”本身尚未超过 `exp_010` 这条更稳的主线
+
+### Session 12
+
+- 已在 `exp_010` 主线上新增一条“更强但人脸安全的退化增强”实验：
+  - `exp_014_ir101_adaface_haar_10ep_laststage_ft_lr1e5_degradeaug`
+- 这轮保持 `exp_010` 的 backbone、学习率和解冻范围不变，只在训练增强里新增：
+  - `GaussianBlur / MotionBlur / GaussNoise / ImageCompression` 的 `OneOf`
+  - 很轻的 `CoarseDropout`
+- 当前已完成训练与预测：
+  - 最佳 checkpoint：`outputs/exp_014_ir101_adaface_haar_10ep_laststage_ft_lr1e5_degradeaug/checkpoints/best.ckpt`
+  - 本地最佳 `val_loss`：`0.09722547978162766`
+  - 本地最佳 `val_acc`：`1.0`
+  - 新 submission：`data/submissions/20260401_185158_exp_014_ir101_adaface_haar_10ep_laststage_ft_lr1e5_degradeaug_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.87665`
+- 结论：
+  - 新增强确实让本地曲线更“好看”，`val_loss` 明显低于 `exp_010`
+  - 但线上分数反而从 `0.87885` 降到 `0.87665`
+  - 这说明当前更强的退化增强提升了本地正则化表现，却没有改善真实测试集泛化，当前主线最优仍然是 `exp_010`
+
+### Session 13
+
+- 已启动一条新的方法线，不再继续训练新模型，而是直接重用 `exp_010` 的最佳 checkpoint，做开放集推理实验：
+  - `exp_015_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype`
+- 本次唯一核心变化是推理建模方式：
+  - 不再直接使用 softmax 三分类输出
+  - 改为提取 face embedding
+  - 使用训练集上的 `Jesse` / `Mila` 样本构建两个 prototype
+  - 在验证集上搜索相似度阈值，低于阈值时预测为 `other`
+- 为支持该实验，本轮工程改动包括：
+  - 分类器新增 `extract_features`
+  - 新增 `prototype` 推理模块
+  - `predict.py` 支持 `inference.mode = prototype`
+  - 新增对应单元测试
+- 当前已完成开放集推理与 submission 生成：
+  - 复用 checkpoint：`outputs/exp_010_ir101_adaface_haar_10ep_laststage_ft_lr1e5/checkpoints/best.ckpt`
+  - 自动选中的阈值：`0.7`
+  - 本地验证集准确率：`0.875`
+  - 新 submission：`data/submissions/20260401_190448_exp_015_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.89842`
+- 结论：
+  - 这是当前最高分，首次超过 `0.89`
+  - 尽管本地验证准确率低于 `exp_010`，线上却明显提升，说明当前真正有效的改进来自**任务建模方式改变**，而不是继续抠训练技巧
+  - 这轮实验强烈支持一个更新后的主判断：`other` 更接近开放集识别问题，不适合继续只当作普通 softmax 第三类处理
+
+### Session 14
+
+- 已在 `exp_015` 的基础上继续做纯推理层迭代：
+  - `exp_016_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype_finegrained`
+- 这轮仍然不重训模型，继续复用 `exp_010` checkpoint，只把 prototype 阈值搜索从粗粒度改成细粒度。
+- 自动搜索结果为：
+  - `selected_threshold = 0.55`
+  - 本地 `val_accuracy = 0.9375`
+- 当前已完成 submission 生成：
+  - 新 submission：`data/submissions/20260401_191216_exp_016_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype_finegrained_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.91299`
+- 结论：
+  - 相比 `exp_015` 的 `0.89842`，这次进一步提升约 `0.01457`
+  - 这说明上一轮 `0.7` 的阈值偏保守，拒识过多
+  - 当前最好结果已经再次证明：后续最高优先级应继续放在开放集推理建模，而不是重新回到训练技巧调参
+
+### Session 15
+
+- 已在 `exp_016` 的基础上继续尝试更灵活的开放集边界：
+  - `exp_017_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype_classspecific`
+- 这轮仍然不重训模型，继续复用 `exp_010` checkpoint，只把 prototype 推理从“单一全局阈值”扩展为“每个目标类一个独立阈值”。
+- 自动搜索结果为：
+  - `selected_thresholds_by_class = {1: 0.45, 2: 0.45}`
+  - 本地 `val_accuracy = 0.9375`
+- 当前已完成 submission 生成：
+  - 新 submission：`data/submissions/20260401_192331_exp_017_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype_classspecific_submission.csv`
+- 该 submission 已手动提交到 Kaggle，当前 public score 为 `0.85572`
+- 结论：
+  - 这次并没有学出稳定的“类别差异阈值”，最终反而退化成了更低的统一阈值
+  - 相比 `exp_016`，预测中有 `136` 张从 `other` 被放宽为目标类，其中 `131` 张是 `0 -> 1`
+  - 线上显著下降说明：当前 16 张验证集不足以支撑更高自由度的阈值拟合，后续应回到更稳健的全局阈值估计，而不是继续增加边界参数

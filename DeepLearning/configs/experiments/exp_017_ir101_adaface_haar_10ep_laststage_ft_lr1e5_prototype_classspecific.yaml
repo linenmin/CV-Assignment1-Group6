@@ -1,0 +1,98 @@
+experiment_name: exp_017_ir101_adaface_haar_10ep_laststage_ft_lr1e5_prototype_classspecific
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+
+model:
+  family: cvlface
+  backbone_name: ir101
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_ir101_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: true
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 10
+  learning_rate: 0.0003
+  backbone_learning_rate: 0.00001
+  weight_decay: 0.0001
+  early_stopping_patience: 20
+
+augmentation:
+  use_horizontal_flip: false
+
+inference:
+  mode: prototype
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold_values_by_class:
+    1:
+      - 0.45
+      - 0.46
+      - 0.47
+      - 0.48
+      - 0.49
+      - 0.50
+      - 0.51
+      - 0.52
+      - 0.53
+      - 0.54
+      - 0.55
+      - 0.56
+      - 0.57
+      - 0.58
+      - 0.59
+      - 0.60
+      - 0.61
+      - 0.62
+      - 0.63
+      - 0.64
+      - 0.65
+      - 0.66
+      - 0.67
+      - 0.68
+      - 0.69
+      - 0.70
+      - 0.71
+      - 0.72
+      - 0.73
+      - 0.74
+      - 0.75
+    2:
+      - 0.45
+      - 0.46
+      - 0.47
+      - 0.48
+      - 0.49
+      - 0.50
+      - 0.51
+      - 0.52
+      - 0.53
+      - 0.54
+      - 0.55
+      - 0.56
+      - 0.57
+      - 0.58
+      - 0.59
+      - 0.60
+      - 0.61
+      - 0.62
+      - 0.63
+      - 0.64
+      - 0.65
+      - 0.66
+      - 0.67
+      - 0.68
+      - 0.69
+      - 0.70
+      - 0.71
+      - 0.72
+      - 0.73
+      - 0.74
+      - 0.75

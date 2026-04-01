@@ -21,6 +21,7 @@ class FaceDataModule(L.LightningDataModule):
         num_workers: int,
         use_horizontal_flip: bool = True,
         use_affine: bool = False,
+        use_degradation_pack: bool = False,
         normalization: str = "imagenet",
     ) -> None:
         super().__init__()
@@ -32,6 +33,7 @@ class FaceDataModule(L.LightningDataModule):
         self.num_workers = num_workers
         self.use_horizontal_flip = use_horizontal_flip
         self.use_affine = use_affine
+        self.use_degradation_pack = use_degradation_pack
         self.normalization = normalization
 
     def setup(self, stage: str | None = None) -> None:
@@ -45,6 +47,7 @@ class FaceDataModule(L.LightningDataModule):
                 self.image_size,
                 use_horizontal_flip=self.use_horizontal_flip,
                 use_affine=self.use_affine,
+                use_degradation_pack=self.use_degradation_pack,
                 normalization=self.normalization,
             ),
             True,

@@ -21,6 +21,7 @@ model:
   pretrained_repo_id:
   freeze_backbone: false
   unfreeze_last_stage: false
+  unfreeze_stage_count: 0
 
 train:
   batch_size: 16
@@ -28,6 +29,8 @@ train:
   learning_rate: 0.0003
   backbone_learning_rate:
   weight_decay: 0.0001
+  monitor_metric: val_acc
+  monitor_mode:
   accelerator: auto
   devices: 1
   precision: 32
@@ -37,3 +40,4 @@ train:
 augmentation:
   use_horizontal_flip: true
   use_affine: false
+  use_degradation_pack: false

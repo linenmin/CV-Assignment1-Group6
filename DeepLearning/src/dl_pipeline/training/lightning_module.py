@@ -23,9 +23,11 @@ class FaceClassifierModule(L.LightningModule):
         weight_decay: float,
         scheduler_name: str,
         max_epochs: int,
+        monitor_metric: str = "val_acc",
         pretrained_repo_id: str | None = None,
         freeze_backbone: bool = False,
         unfreeze_last_stage: bool = False,
+        unfreeze_stage_count: int = 0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -38,6 +40,7 @@ class FaceClassifierModule(L.LightningModule):
             pretrained_repo_id=pretrained_repo_id,
             freeze_backbone=freeze_backbone,
             unfreeze_last_stage=unfreeze_last_stage,
+            unfreeze_stage_count=unfreeze_stage_count,
         )
         self.criterion = nn.CrossEntropyLoss()
         self.val_acc = MulticlassAccuracy(num_classes=num_classes)
@@ -45,6 +48,16 @@ class FaceClassifierModule(L.LightningModule):
 
     def forward(self, images):
         return self.model(images)
+
+    def extract_features(self, images):
+        if hasattr(self.model, "extract_features"):
+            return self.model.extract_features(images)
+        if hasattr(self.model, "forward_features"):
+            features = self.model.forward_features(images)
+            if features.ndim > 2:
+                features = features.mean(dim=(-2, -1))
+            return features
+        raise ValueError("当前模型不支持提取 embedding 特征。")
 
     def training_step(self, batch, batch_idx):
         images, labels = batch
@@ -113,6 +126,13 @@ class FaceClassifierModule(L.LightningModule):
             scheduler = CosineAnnealingLR(optimizer, T_max=self.hparams.max_epochs)
             return {"optimizer": optimizer, "lr_scheduler": scheduler}
         if self.hparams.scheduler_name == "plateau":
-            scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2)
-            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_acc"}}
+            scheduler_mode = "min" if self.hparams.monitor_metric == "val_loss" else "max"
+            scheduler = ReduceLROnPlateau(optimizer, mode=scheduler_mode, factor=0.5, patience=2)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "monitor": self.hparams.monitor_metric,
+                },
+            }
         return optimizer

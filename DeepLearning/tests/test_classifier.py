@@ -50,6 +50,9 @@ class ClassifierFactoryTests(unittest.TestCase):
         logits = model(torch.randn(2, 4))
         self.assertEqual(tuple(logits.shape), (2, 3))
 
+        features = model.extract_features(torch.randn(2, 4))
+        self.assertEqual(tuple(features.shape), (2, 512))
+
     @patch("dl_pipeline.models.classifier.load_cvlface_backbone")
     def test_build_classifier_can_unfreeze_only_last_cvlface_stage(self, mock_loader):
         mock_loader.return_value = DummyCVLFaceBackbone()
@@ -67,6 +70,29 @@ class ClassifierFactoryTests(unittest.TestCase):
 
         frozen_block = model.backbone.model.net.body[45]
         trainable_block = model.backbone.model.net.body[48]
+
+        self.assertTrue(all(not p.requires_grad for p in model.backbone.model.net.input_layer.parameters()))
+        self.assertTrue(all(not p.requires_grad for p in frozen_block.parameters()))
+        self.assertTrue(all(p.requires_grad for p in trainable_block.parameters()))
+        self.assertTrue(all(p.requires_grad for p in model.backbone.model.net.output_layer.parameters()))
+
+    @patch("dl_pipeline.models.classifier.load_cvlface_backbone")
+    def test_build_classifier_can_unfreeze_last_two_cvlface_stages(self, mock_loader):
+        mock_loader.return_value = DummyCVLFaceBackbone()
+
+        model = build_classifier(
+            model_family="cvlface",
+            backbone_name="ir101",
+            num_classes=3,
+            pretrained=True,
+            dropout=0.2,
+            pretrained_repo_id="minchul/cvlface_adaface_ir101_webface4m",
+            freeze_backbone=True,
+            unfreeze_stage_count=2,
+        )
+
+        frozen_block = model.backbone.model.net.body[15]
+        trainable_block = model.backbone.model.net.body[16]
 
         self.assertTrue(all(not p.requires_grad for p in model.backbone.model.net.input_layer.parameters()))
         self.assertTrue(all(not p.requires_grad for p in frozen_block.parameters()))

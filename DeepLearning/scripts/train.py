@@ -19,6 +19,7 @@ from dl_pipeline.common.seed import seed_everything
 from dl_pipeline.data.datamodule import FaceDataModule
 from dl_pipeline.training.progress import AsciiTQDMProgressBar
 from dl_pipeline.training.lightning_module import FaceClassifierModule
+from dl_pipeline.training.monitoring import resolve_monitor_config
 
 
 def main() -> None:
@@ -28,6 +29,7 @@ def main() -> None:
 
     config = load_experiment_config(args.config)
     seed_everything(config["seed"])
+    monitor_config = resolve_monitor_config(config["train"])
 
     splits_dir = project_path(config["data"]["splits_dir"])
     output_root = ensure_dir(project_path("outputs", config["experiment_name"]))
@@ -43,6 +45,7 @@ def main() -> None:
         num_workers=config["data"]["num_workers"],
         use_horizontal_flip=config["augmentation"]["use_horizontal_flip"],
         use_affine=config["augmentation"]["use_affine"],
+        use_degradation_pack=config["augmentation"].get("use_degradation_pack", False),
         normalization=config["data"]["normalization"],
     )
     datamodule.setup()
@@ -58,22 +61,24 @@ def main() -> None:
         weight_decay=config["train"]["weight_decay"],
         scheduler_name=config["train"]["scheduler"],
         max_epochs=config["train"]["max_epochs"],
+        monitor_metric=monitor_config.metric,
         pretrained_repo_id=config["model"].get("pretrained_repo_id"),
         freeze_backbone=config["model"].get("freeze_backbone", False),
         unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
+        unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
     )
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_root / "checkpoints",
         filename="best",
-        monitor="val_acc",
-        mode="max",
+        monitor=monitor_config.metric,
+        mode=monitor_config.mode,
         save_top_k=1,
     )
     early_stopping = EarlyStopping(
-        monitor="val_acc",
+        monitor=monitor_config.metric,
         patience=config["train"]["early_stopping_patience"],
-        mode="max",
+        mode=monitor_config.mode,
     )
     progress_bar = AsciiTQDMProgressBar(refresh_rate=1)
 
@@ -93,7 +98,7 @@ def main() -> None:
 
     metrics = {
         "best_model_path": checkpoint_callback.best_model_path,
-        "best_val_acc": float(checkpoint_callback.best_model_score.cpu().item())
+        f"best_{monitor_config.metric}": float(checkpoint_callback.best_model_score.cpu().item())
         if checkpoint_callback.best_model_score is not None
         else None,
     }
@@ -104,7 +109,7 @@ def main() -> None:
             "experiment_name": config["experiment_name"],
             "stage": "train",
             "best_model_path": checkpoint_callback.best_model_path,
-            "best_val_acc": metrics["best_val_acc"],
+            "best_val_acc": metrics.get("best_val_acc"),
             "config_path": config["config_path"],
         },
     )
