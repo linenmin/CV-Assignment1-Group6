@@ -11,11 +11,15 @@ data:
   val_ratio: 0.2
   num_workers: 4
   detector: haar
+  normalization: imagenet
 
 model:
+  family: timm
   backbone_name: resnet18
   pretrained: true
   dropout: 0.2
+  pretrained_repo_id:
+  freeze_backbone: false
 
 train:
   batch_size: 16
@@ -27,3 +31,7 @@ train:
   precision: 32
   early_stopping_patience: 3
   scheduler: cosine
+
+augmentation:
+  use_horizontal_flip: true
+  use_affine: false

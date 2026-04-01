@@ -11,3 +11,6 @@ scikit-learn>=1.5
 PyYAML>=6.0
 kaggle>=2.0
 huggingface_hub>=0.28
+transformers>=4.40
+omegaconf>=2.3
+facenet-pytorch>=2.6

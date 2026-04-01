@@ -41,10 +41,14 @@ def main() -> None:
         image_size=config["data"]["face_size"],
         batch_size=config["train"]["batch_size"],
         num_workers=config["data"]["num_workers"],
+        use_horizontal_flip=config["augmentation"]["use_horizontal_flip"],
+        use_affine=config["augmentation"]["use_affine"],
+        normalization=config["data"]["normalization"],
     )
     datamodule.setup()
 
     model = FaceClassifierModule(
+        model_family=config["model"]["family"],
         backbone_name=config["model"]["backbone_name"],
         num_classes=int(train_df["class"].nunique()),
         pretrained=config["model"]["pretrained"],
@@ -53,6 +57,8 @@ def main() -> None:
         weight_decay=config["train"]["weight_decay"],
         scheduler_name=config["train"]["scheduler"],
         max_epochs=config["train"]["max_epochs"],
+        pretrained_repo_id=config["model"].get("pretrained_repo_id"),
+        freeze_backbone=config["model"].get("freeze_backbone", False),
     )
 
     checkpoint_callback = ModelCheckpoint(

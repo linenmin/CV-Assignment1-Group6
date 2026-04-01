@@ -13,6 +13,7 @@ from dl_pipeline.models.classifier import build_classifier
 class FaceClassifierModule(L.LightningModule):
     def __init__(
         self,
+        model_family: str,
         backbone_name: str,
         num_classes: int,
         pretrained: bool,
@@ -21,10 +22,20 @@ class FaceClassifierModule(L.LightningModule):
         weight_decay: float,
         scheduler_name: str,
         max_epochs: int,
+        pretrained_repo_id: str | None = None,
+        freeze_backbone: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = build_classifier(backbone_name, num_classes, pretrained, dropout)
+        self.model = build_classifier(
+            model_family=model_family,
+            backbone_name=backbone_name,
+            num_classes=num_classes,
+            pretrained=pretrained,
+            dropout=dropout,
+            pretrained_repo_id=pretrained_repo_id,
+            freeze_backbone=freeze_backbone,
+        )
         self.criterion = nn.CrossEntropyLoss()
         self.val_acc = MulticlassAccuracy(num_classes=num_classes)
         self.val_f1 = MulticlassF1Score(num_classes=num_classes, average="macro")
@@ -62,7 +73,7 @@ class FaceClassifierModule(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = AdamW(
-            self.parameters(),
+            [parameter for parameter in self.parameters() if parameter.requires_grad],
             lr=self.hparams.learning_rate,
             weight_decay=self.hparams.weight_decay,
         )
