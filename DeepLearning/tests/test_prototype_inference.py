@@ -8,11 +8,13 @@ from dl_pipeline.inference.prototype import (
     compute_class_prototypes,
     predict_open_set_with_quality_aware_scorer,
     predict_open_set_with_richer_scorer,
+    predict_open_set_with_verifiers,
     predict_open_set_with_exemplars,
     predict_open_set,
     predict_open_set_with_class_thresholds,
     select_best_quality_aware_params_leave_one_out,
     select_best_richer_scorer_params_leave_one_out,
+    select_best_verifier_thresholds_leave_one_out,
     select_best_exemplar_params,
     select_best_threshold_crossval,
     select_best_threshold,
@@ -553,6 +555,112 @@ class PrototypeInferenceTests(unittest.TestCase):
             },
         )
         self.assertAlmostEqual(best_accuracy, expected_scores[expected_combo])
+
+    def test_predict_open_set_with_verifiers_uses_one_vs_rest_scores(self):
+        gallery_embeddings = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.9, 0.1],
+                [0.0, 1.0],
+                [0.1, 0.9],
+                [0.8, 0.6],
+                [0.75, 0.65],
+            ]
+        )
+        gallery_labels = torch.tensor([1, 1, 2, 2, 0, 0])
+        query_embeddings = torch.tensor(
+            [
+                [0.95, 0.05],  # clear class 1
+                [0.05, 0.95],  # clear class 2
+                [0.78, 0.62],  # looks like other
+            ]
+        )
+
+        predictions, verifier_score_matrix = predict_open_set_with_verifiers(
+            query_embeddings=query_embeddings,
+            gallery_embeddings=gallery_embeddings,
+            gallery_labels=gallery_labels,
+            target_labels=[1, 2],
+            other_label=0,
+            target_top_k=2,
+            negative_top_k=2,
+            thresholds_by_class={1: 0.10, 2: 0.10},
+        )
+
+        self.assertEqual(predictions.tolist(), [1, 2, 0])
+        self.assertGreater(verifier_score_matrix[0, 0].item(), 0.10)
+        self.assertGreater(verifier_score_matrix[1, 1].item(), 0.10)
+        self.assertLess(verifier_score_matrix[2, 0].item(), 0.10)
+        self.assertLess(verifier_score_matrix[2, 1].item(), 0.10)
+
+    def test_select_best_verifier_thresholds_leave_one_out_matches_manual_search(self):
+        embeddings = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.9, 0.1],
+                [0.0, 1.0],
+                [0.1, 0.9],
+                [0.8, 0.6],
+                [0.75, 0.65],
+            ]
+        )
+        labels = torch.tensor([1, 1, 2, 2, 0, 0])
+
+        best_params, best_accuracy = select_best_verifier_thresholds_leave_one_out(
+            embeddings=embeddings,
+            labels=labels,
+            target_labels=[1, 2],
+            other_label=0,
+            target_top_k_values=[1, 2],
+            negative_top_k_values=[1, 2],
+            threshold_values_by_class={
+                1: [0.10, 0.20, 0.30],
+                2: [0.10, 0.20, 0.30],
+            },
+        )
+
+        expected_scores = {}
+        for target_top_k in [1, 2]:
+            for negative_top_k in [1, 2]:
+                for threshold_1 in [0.10, 0.20, 0.30]:
+                    for threshold_2 in [0.10, 0.20, 0.30]:
+                        predictions = []
+                        for query_index in range(len(labels)):
+                            query = embeddings[query_index : query_index + 1]
+                            keep_mask = torch.ones(len(labels), dtype=torch.bool)
+                            keep_mask[query_index] = False
+                            fold_predictions, _ = predict_open_set_with_verifiers(
+                                query_embeddings=query,
+                                gallery_embeddings=embeddings[keep_mask],
+                                gallery_labels=labels[keep_mask],
+                                target_labels=[1, 2],
+                                other_label=0,
+                                target_top_k=target_top_k,
+                                negative_top_k=negative_top_k,
+                                thresholds_by_class={1: threshold_1, 2: threshold_2},
+                            )
+                            predictions.append(int(fold_predictions.item()))
+                        predictions_tensor = torch.tensor(predictions)
+                        expected_scores[
+                            (
+                                target_top_k,
+                                negative_top_k,
+                                threshold_1,
+                                threshold_2,
+                            )
+                        ] = (predictions_tensor == labels).float().mean().item()
+
+        expected_combo = max(expected_scores, key=expected_scores.get)
+        self.assertEqual(
+            best_params,
+            {
+                "target_top_k": expected_combo[0],
+                "negative_top_k": expected_combo[1],
+                "thresholds_by_class": {1: expected_combo[2], 2: expected_combo[3]},
+            },
+        )
+        self.assertAlmostEqual(best_accuracy, expected_scores[expected_combo])
+
 
 if __name__ == "__main__":
     unittest.main()

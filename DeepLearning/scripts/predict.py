@@ -21,11 +21,13 @@ from dl_pipeline.inference.prototype import (
     compute_class_prototypes,
     predict_open_set_with_quality_aware_scorer,
     predict_open_set_with_richer_scorer,
+    predict_open_set_with_verifiers,
     predict_open_set_with_exemplars,
     predict_open_set,
     predict_open_set_with_class_thresholds,
     select_best_quality_aware_params_leave_one_out,
     select_best_richer_scorer_params_leave_one_out,
+    select_best_verifier_thresholds_leave_one_out,
     select_best_exemplar_params,
     select_best_class_thresholds,
     select_best_threshold_crossval,
@@ -410,6 +412,79 @@ def _run_quality_aware_open_set_inference(config, datamodule, model, test_df, ou
     return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
 
 
+def _run_verifier_open_set_inference(config, datamodule, model, test_df, output_root: Path):
+    inference_config = config.get("inference", {})
+    target_labels = inference_config.get("target_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    target_top_k_values = inference_config.get("target_top_k_values", [3, 5, 7])
+    negative_top_k_values = inference_config.get("negative_top_k_values", [3, 5, 7])
+    threshold_values_by_class = {
+        int(label): values
+        for label, values in inference_config.get("threshold_values_by_class", {}).items()
+    }
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model = model.to(device)
+
+    train_embeddings, train_labels = _collect_embeddings(model, datamodule.train_dataloader(), device)
+    val_embeddings, val_labels = _collect_embeddings(model, datamodule.val_dataloader(), device)
+    test_embeddings, test_ids = _collect_embeddings(model, datamodule.predict_dataloader(), device)
+    labeled_embeddings, labeled_labels = combine_embedding_sets(
+        [
+            (train_embeddings, train_labels),
+            (val_embeddings, val_labels),
+        ]
+    )
+
+    best_params, loo_accuracy = select_best_verifier_thresholds_leave_one_out(
+        embeddings=labeled_embeddings,
+        labels=labeled_labels,
+        target_labels=target_labels,
+        other_label=other_label,
+        target_top_k_values=target_top_k_values,
+        negative_top_k_values=negative_top_k_values,
+        threshold_values_by_class=threshold_values_by_class,
+    )
+    test_predictions, verifier_score_matrix = predict_open_set_with_verifiers(
+        query_embeddings=test_embeddings,
+        gallery_embeddings=labeled_embeddings,
+        gallery_labels=labeled_labels,
+        target_labels=target_labels,
+        other_label=other_label,
+        target_top_k=int(best_params["target_top_k"]),
+        negative_top_k=int(best_params["negative_top_k"]),
+        thresholds_by_class={int(label): float(value) for label, value in best_params["thresholds_by_class"].items()},
+    )
+
+    verifier_metrics = {
+        "mode": "verifier_open_set",
+        "target_labels": target_labels,
+        "other_label": other_label,
+        "gallery_source": "all_labeled",
+        "selected_target_top_k": int(best_params["target_top_k"]),
+        "selected_negative_top_k": int(best_params["negative_top_k"]),
+        "selected_thresholds_by_class": {
+            int(label): float(value) for label, value in best_params["thresholds_by_class"].items()
+        },
+        "leave_one_out_accuracy": loo_accuracy,
+        "mean_test_verifier_score_by_class": {
+            str(label): float(verifier_score_matrix[:, index].mean().item())
+            for index, label in enumerate(target_labels)
+        },
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(verifier_metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred)
+        for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="加载最佳模型并生成 submission.csv。")
     parser.add_argument("--config", required=True)
@@ -477,6 +552,8 @@ def main() -> None:
         ordered_predictions = _run_richer_open_set_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "quality_aware_open_set":
         ordered_predictions = _run_quality_aware_open_set_inference(config, datamodule, model, test_df, output_root)
+    elif inference_mode == "verifier_open_set":
+        ordered_predictions = _run_verifier_open_set_inference(config, datamodule, model, test_df, output_root)
     else:
         outputs = trainer.predict(model, datamodule=datamodule)
 

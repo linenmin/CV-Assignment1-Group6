@@ -317,6 +317,53 @@ def predict_open_set_with_quality_aware_scorer(
     return predictions, best_target_scores, other_scores, second_target_scores, effective_thresholds
 
 
+def predict_open_set_with_verifiers(
+    query_embeddings: torch.Tensor,
+    gallery_embeddings: torch.Tensor,
+    gallery_labels: torch.Tensor,
+    target_labels: list[int],
+    other_label: int,
+    target_top_k: int,
+    negative_top_k: int,
+    thresholds_by_class: dict[int, float],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if target_top_k < 1:
+        raise ValueError("target_top_k 至少为 1。")
+    if negative_top_k < 1:
+        raise ValueError("negative_top_k 至少为 1。")
+    if not target_labels:
+        raise ValueError("target_labels 不能为空。")
+
+    verifier_scores: list[torch.Tensor] = []
+    ordered_labels = list(target_labels)
+    for label in ordered_labels:
+        if label not in thresholds_by_class:
+            raise ValueError(f"类别 {label} 缺少对应阈值。")
+        target_gallery = gallery_embeddings[gallery_labels == label]
+        negative_gallery = gallery_embeddings[gallery_labels != label]
+        if target_gallery.numel() == 0:
+            raise ValueError(f"类别 {label} 没有可用 gallery。")
+        if negative_gallery.numel() == 0:
+            raise ValueError(f"类别 {label} 没有可用 negative gallery。")
+
+        target_scores = _mean_topk_similarity(query_embeddings, target_gallery, target_top_k)
+        negative_scores = _mean_topk_similarity(query_embeddings, negative_gallery, negative_top_k)
+        verifier_scores.append(target_scores - negative_scores)
+
+    verifier_score_matrix = torch.stack(verifier_scores, dim=1)
+    best_scores, best_indices = verifier_score_matrix.max(dim=1)
+    predicted_targets = torch.tensor(
+        [ordered_labels[index] for index in best_indices.tolist()],
+        device=query_embeddings.device,
+        dtype=torch.long,
+    )
+    predictions = torch.full_like(predicted_targets, other_label)
+    for row_index, predicted_label in enumerate(predicted_targets.tolist()):
+        if best_scores[row_index].item() >= thresholds_by_class[predicted_label]:
+            predictions[row_index] = predicted_label
+    return predictions, verifier_score_matrix
+
+
 def select_best_threshold(
     val_embeddings: torch.Tensor,
     val_labels: torch.Tensor,
@@ -589,6 +636,70 @@ def select_best_quality_aware_params_leave_one_out(
                 "low_quality_threshold_boost": low_quality_threshold_boost,
             }
             best_accuracy = accuracy
+
+    return best_params, best_accuracy
+
+
+def select_best_verifier_thresholds_leave_one_out(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    target_labels: list[int],
+    other_label: int,
+    target_top_k_values: list[int],
+    negative_top_k_values: list[int],
+    threshold_values_by_class: dict[int, list[float]],
+) -> tuple[dict[str, object], float]:
+    if not target_top_k_values:
+        raise ValueError("target_top_k_values 不能为空。")
+    if not negative_top_k_values:
+        raise ValueError("negative_top_k_values 不能为空。")
+    if not threshold_values_by_class:
+        raise ValueError("threshold_values_by_class 不能为空。")
+
+    ordered_labels = list(target_labels)
+    threshold_grids = [threshold_values_by_class[label] for label in ordered_labels]
+    if any(not grid for grid in threshold_grids):
+        raise ValueError("每个类别都必须提供至少一个候选阈值。")
+
+    best_params: dict[str, object] = {
+        "target_top_k": target_top_k_values[0],
+        "negative_top_k": negative_top_k_values[0],
+        "thresholds_by_class": {
+            label: threshold_values_by_class[label][0] for label in ordered_labels
+        },
+    }
+    best_accuracy = -1.0
+
+    for target_top_k, negative_top_k in product(target_top_k_values, negative_top_k_values):
+        for threshold_values in product(*threshold_grids):
+            thresholds_by_class = {
+                label: value for label, value in zip(ordered_labels, threshold_values)
+            }
+            predictions: list[int] = []
+            for query_index in range(labels.shape[0]):
+                keep_mask = torch.ones(labels.shape[0], dtype=torch.bool, device=labels.device)
+                keep_mask[query_index] = False
+                fold_predictions, _ = predict_open_set_with_verifiers(
+                    query_embeddings=embeddings[query_index : query_index + 1],
+                    gallery_embeddings=embeddings[keep_mask],
+                    gallery_labels=labels[keep_mask],
+                    target_labels=ordered_labels,
+                    other_label=other_label,
+                    target_top_k=target_top_k,
+                    negative_top_k=negative_top_k,
+                    thresholds_by_class=thresholds_by_class,
+                )
+                predictions.append(int(fold_predictions.item()))
+
+            predictions_tensor = torch.tensor(predictions, device=labels.device, dtype=torch.long)
+            accuracy = (predictions_tensor == labels).float().mean().item()
+            if accuracy > best_accuracy:
+                best_params = {
+                    "target_top_k": target_top_k,
+                    "negative_top_k": negative_top_k,
+                    "thresholds_by_class": thresholds_by_class,
+                }
+                best_accuracy = accuracy
 
     return best_params, best_accuracy
 
