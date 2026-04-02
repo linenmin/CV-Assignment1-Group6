@@ -28,6 +28,8 @@ class FaceClassifierModule(L.LightningModule):
         freeze_backbone: bool = False,
         unfreeze_last_stage: bool = False,
         unfreeze_stage_count: int = 0,
+        unfreeze_cvlface_norm: bool = True,
+        unfreeze_cvlface_feature: bool = True,
         loss_name: str = "cross_entropy",
         loss_target_labels: list[int] | None = None,
         arcface_scale: float = 30.0,
@@ -45,6 +47,8 @@ class FaceClassifierModule(L.LightningModule):
             freeze_backbone=freeze_backbone,
             unfreeze_last_stage=unfreeze_last_stage,
             unfreeze_stage_count=unfreeze_stage_count,
+            unfreeze_cvlface_norm=unfreeze_cvlface_norm,
+            unfreeze_cvlface_feature=unfreeze_cvlface_feature,
         )
         self.criterion = nn.CrossEntropyLoss()
         self.loss_name = loss_name

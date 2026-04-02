@@ -830,3 +830,74 @@
      - 更偏 `ViT` 的保守 gating
      - 或直接以 `exp_032` 为 anchor，只在少量高分歧样本上引入 `IR101` 作为二次裁决  
   5. 在没有更强证据前，`exp_032 = 0.92180` 仍应被视为当前最值得保护和提交对照的主线。  
+
+### `exp_036` 当前结果
+
+- `exp_036_vit_adaface_haar_10ep_last2block_ft_prototype_fixed055` 是第一次真正受控的 `ViT` 微调实验：
+  - 不再像 `exp_033` 那样全开 `ViT` 参数
+  - 只解冻最后 `2` 个 transformer blocks
+  - 同时解冻 `norm` 与 `feature`
+  - `backbone lr = 1e-5`
+  - 推理协议保持 `prototype + fixed threshold 0.55`
+- 本地结果为：
+  - `best_val_acc = 1.0`
+  - `prototype val_accuracy = 0.9375`
+  - `selected_threshold = 0.55`
+- 与当前 strongest baseline `exp_032` 相比：
+  - 只有 `2` 张预测变化
+  - 两张都为 `0 -> 2`
+- 这个结果的关键信息不是“它已经超过 `exp_032`”，而是：
+  1. `exp_033` 失败并不能推出“ViT 微调无空间”；  
+  2. 真正被证伪的是“全开 1.15 亿参数的轻量扰动”这条路；  
+  3. 当 `ViT` 微调被限制在最后少量 blocks 时，模型行为重新回到与 `exp_032` 高度接近的稳定区间；  
+  4. 因而当前单模型 `ViT` 线最值得继续探索的轴，不是更复杂融合，也不是重新放开全模型，而是**解冻块数 / 更保守学习率 / 固定阈值协议下的受控 partial fine-tune**。  
+
+### `exp_036` 的阶段性判断
+
+- 这轮离线结果不足以直接宣布 `exp_036` 优于 `exp_032`：
+  - 因为它相对 `exp_032` 只多接收了 `2` 张 `Mila`
+  - 方向上仍然是更松，而不是更保守
+- 但它也明显不同于 `exp_033`：
+  - 没有出现十几到几十张的系统性边界漂移
+  - 这说明受控 `ViT last-block fine-tune` 已经是一个可以继续推进、也值得占用少量 Kaggle 配额验证的方向
+- 因此当前最合理的结论是：
+  1. `exp_032 = 0.92180` 仍是当前 strongest online baseline；  
+  2. `exp_036` 是第一个**没有破坏 `exp_032` 主体行为**的单模型 `ViT` 微调版本，应视为下一条最合理的近邻候选；  
+  3. 如果后续继续推进 `ViT` 单模型线，优先级应放在：
+     - `last-1 / last-2 / last-3 blocks` 的小范围探索
+     - 或维持 `last-2 blocks` 不变，只进一步收缩 `backbone lr`
+     而不是回到全开微调或重新做线性融合。  
+
+### `exp_037` 当前结果
+
+- `exp_037_vit_adaface_haar_10ep_last2blockonly_ft_prototype_fixed055` 是对上一轮批判的直接验证：
+  - 继续保留 `last-2 blocks`
+  - 但冻结 `feature`
+  - 同时冻结 `norm`
+  - 从而把可训练参数真正压缩到 `blocks-only`
+- 本地结果为：
+  - `best_val_acc = 1.0`
+  - `prototype val_accuracy = 0.9375`
+  - `selected_threshold = 0.55`
+- 相比 `exp_036`：
+  - 只差 `1` 张
+  - 方向为 `2 -> 0`
+- 相比 `exp_032`：
+  - 也只差 `1` 张
+  - 方向为 `0 -> 2`
+- 这轮结果的价值高于表面上的“只改 1 张”，因为它回答了一个结构性问题：
+  1. `exp_036` 的确不能被解释成“纯 last-block 微调”，因为 `feature` 参与更新时会把行为往更宽松的接收方向推；  
+  2. 一旦冻结 `feature/norm`，模型立即比 `exp_036` 更接近 `exp_032`，这说明前一轮批判抓到了真实主因；  
+  3. 因而当前真正成立的单模型 `ViT` 主线，不是“继续围绕 `feature` 做学习率小修”，而是**blocks-only partial fine-tune**。  
+
+### `exp_037` 的阶段性判断
+
+- 这轮还不足以宣布 `exp_037` 已经超过 `exp_032`：
+  - 因为它仍保留 `1` 张 `0 -> 2`
+  - 线上效果仍需 Kaggle 才能验证
+- 但它已经把后续方向显著收敛了：
+  1. “是否冻结 `feature`”这个问题基本已经被回答：应该冻结；  
+  2. 下一步最有信息量的实验不再是继续讨论 `feature`，而是：
+     - `blocks-only` 条件下的 `last-1 / last-3` 对照
+     - 或和训练正交的 `TTA`
+  3. 继续回到 `exp_036` 这种带 `feature` 的版本、继续扫线性融合、或继续做全开微调，优先级都已经明显下降。  

@@ -679,3 +679,73 @@
   - 即使把权重压到 `IR101:ViT = 0.25:0.75`，线性均值融合仍然在损害 `exp_032` 的少量高价值修正；
   - 当前证据不支持继续在线性 mean fusion 上扫更多权重；
   - 若继续做融合，更值得尝试的是更偏 `ViT` 的非对称策略或非线性 gating，而不是继续做简单均值。
+
+### Session 33
+
+- 已完成 `ViT` 受控 partial fine-tune 实验：
+  - `exp_036_vit_adaface_haar_10ep_last2block_ft_prototype_fixed055`
+- 本轮的关键改动不是继续“轻量全开微调”，而是让 `CVLFace ViT` 支持受控解冻：
+  - 仅解冻最后 `2` 个 transformer blocks
+  - 同时解冻 `norm` 与 `feature`
+  - 其余 backbone 保持冻结
+  - 推理继续固定为 `prototype + threshold=0.55`
+- 为支持该实验，本轮工程改动包括：
+  - 在 `src/dl_pipeline/models/classifier.py` 中新增 `ViT blocks` 分支的 stage-unfreeze 逻辑
+  - 在 `tests/test_classifier.py` 中新增 `ViT partial unfreeze` 单元测试
+  - 新增配置：`configs/experiments/exp_036_vit_adaface_haar_10ep_last2block_ft_prototype_fixed055.yaml`
+- 当前本地结果：
+  - `best_val_acc = 1.0`
+  - `prototype val_accuracy = 0.9375`
+  - `selected_threshold = 0.55`
+  - submission：`data/submissions/20260402_123255_exp_036_vit_adaface_haar_10ep_last2block_ft_prototype_fixed055_submission.csv`
+- 相比 `exp_032`：
+  - 只有 `2` 张预测变化
+  - 全部是 `0 -> 2`
+  - 分布从 `0:1082, 1:352, 2:382` 变成：
+    - `0:1080, 1:352, 2:384`
+- 相比 `exp_019`：
+  - 共 `11` 张预测变化
+  - `9` 张 `0 -> 1`
+  - `2` 张 `0 -> 2`
+- 结论：
+  - `exp_036` 没有像 `exp_033` 那样出现明显的边界放宽漂移；
+  - `exp_033` 证伪的是“全开 ViT 的轻量乱动”，而不是“所有 ViT 微调都无效”；
+  - 当前这版 `last-2-block` 微调基本保住了 `exp_032` 的主体行为，只额外增加了 `2` 张 `Mila` 接收，因此它是一个合理的后续提交候选，但还不足以在离线阶段直接取代 `exp_032`。
+
+### Session 34
+
+- 已完成真正的 `blocks-only ViT` 微调实验：
+  - `exp_037_vit_adaface_haar_10ep_last2blockonly_ft_prototype_fixed055`
+- 本轮相对 `exp_036` 的唯一方法层变化是：
+  - 继续只解冻最后 `2` 个 transformer blocks
+  - 但显式冻结 `norm`
+  - 显式冻结 `feature`
+  - 即不再让 `51.6M` 参数的 projection head 参与更新
+- 为支持该实验，本轮工程改动包括：
+  - 在 `src/dl_pipeline/models/classifier.py` 中新增 `unfreeze_cvlface_norm` / `unfreeze_cvlface_feature`
+  - 在 `src/dl_pipeline/training/lightning_module.py`、`scripts/train.py`、`scripts/predict.py` 中把这两个开关接到配置层
+  - 在 `tests/test_classifier.py` 中新增 `ViT feature+norm freeze during partial unfreeze` 测试
+  - 新增配置：`configs/experiments/exp_037_vit_adaface_haar_10ep_last2blockonly_ft_prototype_fixed055.yaml`
+- 验证结果：
+  - `unittest discover -s tests -v`：`45/45` 通过
+  - `python -m compileall src scripts`：通过
+- 当前本地结果：
+  - `best_val_acc = 1.0`
+  - `prototype val_accuracy = 0.9375`
+  - `selected_threshold = 0.55`
+  - submission：`data/submissions/20260402_134601_exp_037_vit_adaface_haar_10ep_last2blockonly_ft_prototype_fixed055_submission.csv`
+- 相比 `exp_032`：
+  - 仅 `1` 张预测变化
+  - `0 -> 2`: `1`
+- 相比 `exp_036`：
+  - 仅 `1` 张预测变化
+  - `2 -> 0`: `1`
+- 相比 `exp_019`：
+  - 共 `12` 张变化
+  - `9` 张 `0 -> 1`
+  - `2` 张 `0 -> 2`
+  - `1` 张 `2 -> 0`
+- 结论：
+  - 冻结 `feature/norm` 后，`exp_037` 比 `exp_036` 更接近 `exp_032`，这直接支持了“`exp_036` 的主导更新来自 feature 层”这个判断；
+  - `blocks-only` 是比 `exp_036` 更真实的受控 `ViT partial fine-tune`；
+  - 但当前它仍比 `exp_032` 多 `1` 张 `0 -> 2`，离线还不足以直接宣布它优于 strongest baseline。

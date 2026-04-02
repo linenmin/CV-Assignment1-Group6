@@ -34,20 +34,53 @@ def _resolve_cvlface_stage_lengths(backbone: nn.Module) -> list[int]:
     return stage_lengths
 
 
-def _unfreeze_last_cvlface_stages(backbone: nn.Module, stage_count: int) -> None:
+def _resolve_cvlface_vit_block_count(backbone: nn.Module) -> int:
+    try:
+        net = backbone.model.net
+        blocks = net.blocks
+    except AttributeError as exc:
+        raise ValueError("当前 cvlface ViT backbone 结构不支持按 block 解冻。") from exc
+
+    return len(blocks)
+
+
+def _unfreeze_last_cvlface_stages(
+    backbone: nn.Module,
+    stage_count: int,
+    *,
+    unfreeze_vit_norm: bool = True,
+    unfreeze_vit_feature: bool = True,
+) -> None:
     if stage_count <= 0:
         return
 
-    stage_lengths = _resolve_cvlface_stage_lengths(backbone)
-    if stage_count > len(stage_lengths):
-        raise ValueError(f"请求解冻 {stage_count} 个 stage，但当前 backbone 只有 {len(stage_lengths)} 个 stage。")
-
     net = backbone.model.net
-    body = net.body
-    trainable_block_count = sum(stage_lengths[-stage_count:])
-    _set_requires_grad(net.output_layer, True)
-    for block in body[-trainable_block_count:]:
-        _set_requires_grad(block, True)
+    if hasattr(net, "body"):
+        stage_lengths = _resolve_cvlface_stage_lengths(backbone)
+        if stage_count > len(stage_lengths):
+            raise ValueError(f"请求解冻 {stage_count} 个 stage，但当前 backbone 只有 {len(stage_lengths)} 个 stage。")
+
+        body = net.body
+        trainable_block_count = sum(stage_lengths[-stage_count:])
+        _set_requires_grad(net.output_layer, True)
+        for block in body[-trainable_block_count:]:
+            _set_requires_grad(block, True)
+        return
+
+    if hasattr(net, "blocks"):
+        block_count = _resolve_cvlface_vit_block_count(backbone)
+        if stage_count > block_count:
+            raise ValueError(f"请求解冻 {stage_count} 个 block，但当前 backbone 只有 {block_count} 个 block。")
+
+        for block in net.blocks[-stage_count:]:
+            _set_requires_grad(block, True)
+        if unfreeze_vit_norm and hasattr(net, "norm"):
+            _set_requires_grad(net.norm, True)
+        if unfreeze_vit_feature and hasattr(net, "feature"):
+            _set_requires_grad(net.feature, True)
+        return
+
+    raise ValueError("当前 cvlface backbone 结构不支持按 stage/block 解冻。")
 
 
 class ArcFaceHead(nn.Module):
@@ -97,6 +130,8 @@ class CVLFaceClassifier(nn.Module):
         freeze_backbone: bool,
         unfreeze_last_stage: bool = False,
         unfreeze_stage_count: int = 0,
+        unfreeze_cvlface_norm: bool = True,
+        unfreeze_cvlface_feature: bool = True,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -104,7 +139,12 @@ class CVLFaceClassifier(nn.Module):
         if freeze_backbone or effective_unfreeze_stage_count > 0:
             _set_requires_grad(self.backbone, False)
         if effective_unfreeze_stage_count > 0:
-            _unfreeze_last_cvlface_stages(self.backbone, effective_unfreeze_stage_count)
+            _unfreeze_last_cvlface_stages(
+                self.backbone,
+                effective_unfreeze_stage_count,
+                unfreeze_vit_norm=unfreeze_cvlface_norm,
+                unfreeze_vit_feature=unfreeze_cvlface_feature,
+            )
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(feature_dim, num_classes),
@@ -130,6 +170,8 @@ def build_classifier(
     freeze_backbone: bool = False,
     unfreeze_last_stage: bool = False,
     unfreeze_stage_count: int = 0,
+    unfreeze_cvlface_norm: bool = True,
+    unfreeze_cvlface_feature: bool = True,
 ) -> nn.Module:
     if model_family == "cvlface":
         if not pretrained_repo_id:
@@ -143,6 +185,8 @@ def build_classifier(
             freeze_backbone=freeze_backbone,
             unfreeze_last_stage=unfreeze_last_stage,
             unfreeze_stage_count=unfreeze_stage_count,
+            unfreeze_cvlface_norm=unfreeze_cvlface_norm,
+            unfreeze_cvlface_feature=unfreeze_cvlface_feature,
         )
 
     return timm.create_model(

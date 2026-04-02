@@ -72,6 +72,8 @@ def _load_model_from_checkpoint(config, checkpoint_path: str):
         freeze_backbone=config["model"].get("freeze_backbone", False),
         unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
         unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
+        unfreeze_cvlface_norm=config["model"].get("unfreeze_cvlface_norm", True),
+        unfreeze_cvlface_feature=config["model"].get("unfreeze_cvlface_feature", True),
         loss_name=loss_config.get("name", "cross_entropy"),
         loss_target_labels=loss_config.get("target_labels"),
         arcface_scale=loss_config.get("arcface_scale", 30.0),
