@@ -4,13 +4,18 @@ import torch
 from sklearn.model_selection import StratifiedKFold
 
 from dl_pipeline.inference.prototype import (
+    average_normalized_embedding_sets,
     combine_embedding_sets,
+    compute_similarity_matrix,
     compute_class_prototypes,
+    fuse_similarity_matrices,
+    predict_open_set_with_lookalikes,
     predict_open_set_with_quality_aware_scorer,
     predict_open_set_with_richer_scorer,
     predict_open_set_with_verifiers,
     predict_open_set_with_exemplars,
     predict_open_set,
+    predict_open_set_from_similarity_matrix,
     predict_open_set_with_class_thresholds,
     select_best_quality_aware_params_leave_one_out,
     select_best_richer_scorer_params_leave_one_out,
@@ -23,6 +28,123 @@ from dl_pipeline.inference.prototype import (
 
 
 class PrototypeInferenceTests(unittest.TestCase):
+    def test_compute_similarity_matrix_returns_scores_in_requested_label_order(self):
+        prototypes = {
+            2: torch.tensor([0.0, 1.0]),
+            1: torch.tensor([1.0, 0.0]),
+        }
+        query_embeddings = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+            ]
+        )
+
+        similarity_matrix, prototype_labels = compute_similarity_matrix(
+            query_embeddings=query_embeddings,
+            prototypes=prototypes,
+            prototype_labels=[1, 2],
+        )
+
+        self.assertEqual(prototype_labels, [1, 2])
+        expected = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+            ]
+        )
+        self.assertTrue(torch.allclose(similarity_matrix, expected, atol=1e-5))
+
+    def test_fuse_similarity_matrices_supports_mean_and_min(self):
+        first = torch.tensor([[0.80, 0.20], [0.30, 0.70]])
+        second = torch.tensor([[0.60, 0.40], [0.40, 0.60]])
+
+        mean_fused = fuse_similarity_matrices([first, second], method="mean")
+        min_fused = fuse_similarity_matrices([first, second], method="min")
+
+        self.assertTrue(
+            torch.allclose(
+                mean_fused,
+                torch.tensor([[0.70, 0.30], [0.35, 0.65]]),
+                atol=1e-5,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                min_fused,
+                torch.tensor([[0.60, 0.20], [0.30, 0.60]]),
+                atol=1e-5,
+            )
+        )
+
+    def test_predict_open_set_from_similarity_matrix_applies_threshold_after_fusion(self):
+        similarity_matrix = torch.tensor(
+            [
+                [0.82, 0.20],
+                [0.55, 0.60],
+                [0.51, 0.49],
+            ]
+        )
+
+        predictions, scores = predict_open_set_from_similarity_matrix(
+            similarity_matrix=similarity_matrix,
+            prototype_labels=[1, 2],
+            other_label=0,
+            threshold=0.60,
+        )
+
+        self.assertEqual(predictions.tolist(), [1, 2, 0])
+        self.assertTrue(
+            torch.allclose(
+                scores,
+                torch.tensor([0.82, 0.60, 0.51]),
+                atol=1e-6,
+            )
+        )
+
+    def test_predict_open_set_with_lookalikes_rejects_when_nearest_is_lookalike(self):
+        prototypes = {
+            1: torch.tensor([1.0, 0.0]),
+            2: torch.tensor([0.0, 1.0]),
+            3: torch.tensor([0.6, 0.4]),
+            4: torch.tensor([0.4, 0.6]),
+        }
+        query_embeddings = torch.tensor(
+            [
+                [0.98, 0.02],  # clear Jesse
+                [0.60, 0.40],  # nearest Michael-like
+            ]
+        )
+
+        predictions, nearest_labels, scores = predict_open_set_with_lookalikes(
+            query_embeddings=query_embeddings,
+            prototypes=prototypes,
+            target_labels=[1, 2],
+            lookalike_labels=[3, 4],
+            other_label=0,
+            threshold=0.85,
+        )
+
+        self.assertEqual(predictions.tolist(), [1, 0])
+        self.assertEqual(nearest_labels.tolist(), [1, 3])
+        self.assertGreater(scores[0].item(), 0.85)
+
+    def test_average_normalized_embedding_sets_normalizes_before_and_after_mean(self):
+        first = torch.tensor([[2.0, 0.0], [0.0, 3.0]])
+        second = torch.tensor([[1.0, 1.0], [1.0, 1.0]])
+
+        averaged = average_normalized_embedding_sets([first, second])
+
+        expected = torch.tensor(
+            [
+                [0.9238795, 0.3826834],
+                [0.3826834, 0.9238795],
+            ]
+        )
+        self.assertTrue(torch.allclose(averaged, expected, atol=1e-5))
+        norms = torch.linalg.norm(averaged, dim=1)
+        self.assertTrue(torch.allclose(norms, torch.ones_like(norms), atol=1e-5))
+
     def test_combine_embedding_sets_concatenates_embeddings_and_labels(self):
         first_embeddings = torch.tensor([[1.0, 0.0], [0.8, 0.2]])
         first_labels = torch.tensor([1, 1])

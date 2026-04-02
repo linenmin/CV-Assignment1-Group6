@@ -4,7 +4,7 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
-from dl_pipeline.models.classifier import build_classifier
+from dl_pipeline.models.classifier import ArcFaceHead, build_classifier
 
 
 class DummyBackbone(nn.Module):
@@ -30,6 +30,24 @@ class DummyCVLFaceBackbone(nn.Module):
 
 
 class ClassifierFactoryTests(unittest.TestCase):
+    def test_arcface_head_applies_margin_to_target_class_only(self):
+        head = ArcFaceHead(in_features=2, num_classes=2, scale=1.0, margin=0.5)
+        with torch.no_grad():
+            head.weight.copy_(torch.tensor([[1.0, 0.0], [0.0, 1.0]]))
+
+        features = torch.tensor([[1.0, 0.0]])
+        labels = torch.tensor([0])
+
+        logits_without_margin = head(features)
+        logits_with_margin = head(features, labels)
+
+        self.assertLess(logits_with_margin[0, 0].item(), logits_without_margin[0, 0].item())
+        self.assertAlmostEqual(
+            logits_with_margin[0, 1].item(),
+            logits_without_margin[0, 1].item(),
+            places=6,
+        )
+
     @patch("dl_pipeline.models.classifier.load_cvlface_backbone")
     def test_build_classifier_can_wrap_cvlface_backbone(self, mock_loader):
         mock_loader.return_value = DummyBackbone()

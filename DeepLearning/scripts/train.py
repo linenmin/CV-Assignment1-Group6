@@ -30,6 +30,7 @@ def main() -> None:
     config = load_experiment_config(args.config)
     seed_everything(config["seed"])
     monitor_config = resolve_monitor_config(config["train"])
+    loss_config = config.get("loss", {})
 
     splits_dir = project_path(config["data"]["splits_dir"])
     output_root = ensure_dir(project_path("outputs", config["experiment_name"]))
@@ -66,6 +67,10 @@ def main() -> None:
         freeze_backbone=config["model"].get("freeze_backbone", False),
         unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
         unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
+        loss_name=loss_config.get("name", "cross_entropy"),
+        loss_target_labels=loss_config.get("target_labels"),
+        arcface_scale=loss_config.get("arcface_scale", 30.0),
+        arcface_margin=loss_config.get("arcface_margin", 0.5),
     )
 
     checkpoint_callback = ModelCheckpoint(

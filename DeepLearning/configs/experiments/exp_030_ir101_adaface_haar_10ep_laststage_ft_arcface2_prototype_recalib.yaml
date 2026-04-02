@@ -1,0 +1,42 @@
+experiment_name: exp_030_ir101_adaface_haar_10ep_laststage_ft_arcface2_prototype_recalib
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+
+model:
+  family: cvlface
+  backbone_name: ir101
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_ir101_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: true
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 10
+  learning_rate: 0.0003
+  backbone_learning_rate: 0.00003
+  weight_decay: 0.0001
+  early_stopping_patience: 20
+  monitor_metric: val_target_acc
+  monitor_mode: max
+
+augmentation:
+  use_horizontal_flip: false
+
+loss:
+  name: arcface
+  target_labels: [1, 2]
+  arcface_scale: 30.0
+  arcface_margin: 0.5
+
+inference:
+  mode: prototype
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold_values: [0.50, 0.525, 0.55, 0.575, 0.60]

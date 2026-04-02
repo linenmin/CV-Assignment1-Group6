@@ -1,0 +1,35 @@
+experiment_name: exp_033_vit_adaface_haar_3ep_lightft_prototype_recalib
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: false
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 0
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 3
+  learning_rate: 0.0003
+  backbone_learning_rate: 0.000005
+  weight_decay: 0.0001
+  early_stopping_patience: 3
+
+augmentation:
+  use_horizontal_flip: false
+
+inference:
+  mode: prototype
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold_values: [0.525, 0.55, 0.575, 0.6]

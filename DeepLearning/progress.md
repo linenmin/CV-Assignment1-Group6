@@ -428,3 +428,254 @@
   - verifier 方案在当前实现下学出了过低阈值，导致相对 `exp_019` 有 `119` 张预测变化，而且全是把 `other` 放宽为目标类；
   - 这和此前多轮掉分实验的错误模式高度一致；
   - 因而它虽然完成了代码验证，但不值得占用 Kaggle 日提交配额。
+
+### Session 23
+
+- 已实现并离线运行同 backbone 多 checkpoint embedding 集成：
+  - `exp_028_ir101_adaface_haar_10ep_ensemble_prototype_fixed055`
+- 这轮固定协议为：
+  - `exp_009 + exp_010 + exp_012 + exp_014`
+  - 各自 embedding 先 `L2 normalize`
+  - 跨模型平均后再 `L2 normalize`
+  - 推理仍使用 `prototype + threshold=0.55`
+- 当前已完成 submission 生成：
+  - `data/submissions/20260401_225724_exp_028_ir101_adaface_haar_10ep_ensemble_prototype_fixed055_submission.csv`
+- 本地结果为：
+  - `val_accuracy = 0.875`
+- 相比 `exp_019`：
+  - 只改了 `20` 张预测
+  - 全部是更保守的回收：
+    - `1 -> 0`: `3`
+    - `2 -> 0`: `17`
+- 结论：
+  - 当前这组同源 checkpoint 平均没有带来有效互补；
+  - 它主要是在稀释 `exp_009` 的任务特异性 embedding，导致更多目标样本被推回 `other`；
+  - 这轮不值得消耗 Kaggle 配额，也说明“继续堆同 backbone checkpoint 平均”不是当前优先方向。
+
+### Session 24
+
+- 已重新核对作业文本，确认 `other` 的真实构成不是随机陌生人，而是两组 look-alike：
+  - `Michael Cera`（接近 `Jesse Eisenberg`）
+  - `Sarah Hyland`（接近 `Mila Kunis`）
+- 已基于 `exp_009` 的 `all 80 labeled` embedding 对 `other=0` 的 `20` 张样本做 `k=2` 聚类，并生成分析产物：
+  - `reports/analysis/exp_029_other_k2/report.md`
+  - `reports/analysis/exp_029_other_k2/summary.json`
+  - `reports/analysis/exp_029_other_k2/other_cluster_assignments.csv`
+  - `reports/analysis/exp_029_other_k2/other_k2_pca.png`
+- 当前关键结果：
+  - `other` 正好分成两个各 `10` 张的簇
+  - `silhouette_score = 0.3656`
+  - 一个簇显著更像 `Jesse`，另一个显著更像 `Mila`
+  - `michael_like` 簇均值：
+    - `mean_sim_to_jesse = 0.3316`
+    - `mean_sim_to_mila = 0.0618`
+  - `sarah_like` 簇均值：
+    - `mean_sim_to_jesse = 0.0251`
+    - `mean_sim_to_mila = 0.3821`
+- 诊断性结论：
+  - 当前任务的主要结构更接近“look-alike-aware rejection”，而不是泛化的 `other` 开放集拒识；
+  - 但训练集上的 look-alike 样本与目标 prototype 的相似度仍明显低于当前接受阈值 `0.55`，因此这条线更像一个**值得验证的诊断方向**，而不是已确认的大增益方向；
+  - 下一步应先做零新超参数的 `4 prototype` 推理诊断，而不是重新引入 margin 搜索或直接重训。
+
+### Session 25
+
+- 已完成零新超参数的 look-alike-aware 推理实验：
+  - `exp_029_ir101_adaface_haar_10ep_lookalike_prototype_fixed055`
+- 这轮继续复用 `exp_009` checkpoint，不重训模型，只把 `other` 拆成两个聚类原型：
+  - `michael_like`
+  - `sarah_like`
+- 推理规则固定为：
+  - 最近 prototype 是 `michael_like` 或 `sarah_like` → `other`
+  - 最近 prototype 是 `Jesse` / `Mila` 且分数大于 `0.55` → 接收
+  - 否则 → `other`
+- 当前已完成 submission 生成：
+  - `data/submissions/20260401_234742_exp_029_ir101_adaface_haar_10ep_lookalike_prototype_fixed055_submission.csv`
+- 本地结果为：
+  - `val_accuracy = 0.9375`
+  - `test_nearest_label_counts = {1:393, 2:525, 3:431, 4:467}`
+- 相比 `exp_019`：
+  - submission **逐行完全一致**
+  - 差异条数为 `0`
+- 结论：
+  - 在当前 `prototype + threshold=0.55` 协议下，把 `other` 显式拆成两组 look-alike prototype 并不会改变线上预测；
+  - 这说明当前 `0.91685 -> 0.97` 的差距，至少不是由“现有规则没显式利用 Michael/Sarah 结构”直接造成的；
+  - 因而 look-alike-aware inference 这条零新超参数推理线可以先判定为诊断完成，不值得继续占用 Kaggle 配额。
+
+### Session 26
+
+- 已完成训练侧的 metric-aligned pilot：
+  - `exp_030_ir101_adaface_haar_10ep_laststage_ft_arcface2_prototype_recalib`
+- 这轮以 `exp_009` 的训练协议为底座，仅做最小改动：
+  - loss 从 `CrossEntropy` 改为 `2 类 ArcFace`
+  - 训练时只对 `Jesse / Mila` 计算 margin loss
+  - `other=0` 不参与 loss
+  - 推理仍使用 `prototype`，只在 `[0.50, 0.525, 0.55, 0.575, 0.60]` 上做小范围阈值重校准
+- 当前训练结果：
+  - `best_val_target_acc = 0.9167`
+  - 训练过程中 `val_target_acc` 基本没有突破起点
+- 当前推理结果：
+  - `selected_threshold = 0.55`
+  - `val_accuracy = 0.9375`
+  - submission：`data/submissions/20260402_001807_exp_030_ir101_adaface_haar_10ep_laststage_ft_arcface2_prototype_recalib_submission.csv`
+- 相比 `exp_019`：
+  - 共 `278` 张预测变化
+  - 全部是把 `other` 放宽为目标类：
+    - `0 -> 1`: `195`
+    - `0 -> 2`: `83`
+  - 分布从 `0:1091, 1:343, 2:382` 变成：
+    - `0:813, 1:538, 2:465`
+- 结论：
+  - 当前版本的 2 类 ArcFace 并没有带来更稳的 open-set embedding，反而显著削弱了拒识；
+  - 线上 Kaggle 分数进一步确认了这一点：`0.76927`；
+  - 这轮已经被线上正式证伪，不值得继续占用 Kaggle 配额；
+  - 但它也说明一个重要事实：仅仅把训练目标对齐到角度空间还不够，当前任务还需要显式处理 `other` 的拒识约束。
+
+### Session 27
+
+- 已完成受控的 backbone 切换实验：
+  - `exp_031_ir50_adaface_haar_10ep_laststage_ft_prototype_fixed055`
+- 这轮只做一件事：
+  - 把 `IR101 AdaFace` 换成 `IR50 AdaFace`
+  - 其余训练协议与 `exp_009 / exp_019` 尽量保持一致
+  - 推理仍固定为 `prototype + threshold=0.55`
+- 当前训练结果：
+  - `best_val_acc = 0.9444`
+- 当前推理结果：
+  - `selected_threshold = 0.55`
+  - `val_accuracy = 0.875`
+  - submission：`data/submissions/20260402_105844_exp_031_ir50_adaface_haar_10ep_laststage_ft_prototype_fixed055_submission.csv`
+- 相比 `exp_019`：
+  - 共 `237` 张预测变化
+  - 主要模式是显著放宽接收：
+    - `0 -> 1`: `233`
+    - `0 -> 2`: `2`
+    - `2 -> 0`: `2`
+  - 分布从 `0:1091, 1:343, 2:382` 变成：
+    - `0:858, 1:576, 2:382`
+- 结论：
+  - `IR50` 在当前协议下没有带来更稳的开放集行为，反而更容易把 `other` 吸入 `Jesse`；
+  - 这轮离线信号不值得直接消耗 Kaggle 配额；
+  - 但它也说明“同家族 iResNet 容量切换”不是当前主杠杆，若继续走新 backbone 轴，下一步应优先考虑结构差异更大的 `ViT`。
+
+### Session 28
+
+- 已完成异构 backbone 的低成本诊断实验：
+  - `exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055`
+- 这轮的目标不是训练 `ViT` 分类头，而是尽量不改现有 pipeline，先检验：
+  - `minchul/cvlface_adaface_vit_base_webface4m` 的预训练 embedding 在当前 open-set 协议下是否有可用信号；
+  - 是否值得继续投入 `ViT fine-tune` 的工程适配。
+- 为避免无意义地训练随机分类头，这轮采用：
+  - frozen backbone
+  - `1 epoch` 仅产出可加载 checkpoint
+  - 推理仍固定为 `prototype + threshold=0.55`
+- 当前训练结果：
+  - `best_val_acc = 0.75`
+- 当前推理结果：
+  - `selected_threshold = 0.55`
+  - `val_accuracy = 0.9375`
+  - submission：`data/submissions/20260402_111133_exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055_submission.csv`
+- 相比 `exp_019`：
+  - 共 `11` 张预测变化
+  - 变化方向非常小：
+    - `0 -> 1`: `9`
+    - `0 -> 2`: `1`
+    - `2 -> 0`: `1`
+  - 分布从 `0:1091, 1:343, 2:382` 变成：
+    - `0:1082, 1:352, 2:382`
+- 结论：
+  - frozen `ViT` 的 prototype 行为和当前最强基线非常接近，没有像 `exp_030 / exp_031` 一样出现大规模“错误放宽接收”；
+  - 这说明 `ViT` 不是一个无效方向，反而是当前最值得继续深入的新 backbone 轴；
+  - 线上 Kaggle public score 已确认是 `0.92180`，超过 `exp_019 = 0.91685`；
+  - 这说明虽然离线只改了 `11` 张，但这些修正是高价值修正，`exp_032` 现已成为新的 strongest online baseline。
+
+### Session 29
+
+- 已完成 `ViT` 轻量微调实验：
+  - `exp_033_vit_adaface_haar_3ep_lightft_prototype_recalib`
+- 这轮保持改动最小：
+  - `ViT AdaFace` backbone
+  - `freeze_backbone = false`
+  - `backbone_learning_rate = 5e-6`
+  - `max_epochs = 3`
+  - 推理侧只在 `[0.525, 0.55, 0.575, 0.6]` 上做窄范围阈值重校准
+- 当前训练结果：
+  - `best_val_acc = 0.9167`
+  - `val_loss` 从 `0.4760` 降到 `0.2292`
+- 当前推理结果：
+  - `selected_threshold = 0.525`
+  - `val_accuracy = 0.9375`
+  - submission：`data/submissions/20260402_112429_exp_033_vit_adaface_haar_3ep_lightft_prototype_recalib_submission.csv`
+- 相比 `exp_019`：
+  - 共 `12` 张预测变化
+  - 全部是更松的接收：
+    - `0 -> 1`: `10`
+    - `0 -> 2`: `2`
+  - 分布从 `0:1091, 1:343, 2:382` 变成：
+    - `0:1079, 1:353, 2:384`
+- 相比 `exp_032`：
+  - 只多改了 `3` 张
+  - 方向仍然是继续放宽接收：
+    - `0 -> 1`: `1`
+    - `0 -> 2`: `2`
+- 结论：
+  - `ViT` 轻量微调确实让分类头在本地验证上更快适配了任务；
+  - 但对最终 open-set prototype 行为的改善几乎没有，且变化方向仍然偏向“更宽松地接收目标类”；
+  - 因此这轮不值得直接消耗 Kaggle 配额，也不建议继续单模型深挖 `ViT fine-tune`；
+  - `ViT` 线目前最有价值的用途，更可能是和 `exp_019` 做异构融合，而不是替代 `exp_032` 这条 frozen ViT 主线。
+
+### Session 30
+
+- 已为异构融合新增独立工具链：
+  - `scripts/export_embeddings.py`
+  - `scripts/predict_score_fusion.py`
+- 为避免 `CVLFace` 的 `wrapper` 模块污染，这条链路采用：
+  - 子进程逐个导出成员模型的 train/val/test embedding
+  - 再在干净的融合脚本中读取 `.pt` 文件做 score fusion
+- 同时新增了受控 helper 与测试：
+  - `compute_similarity_matrix`
+  - `predict_open_set_from_similarity_matrix`
+  - `fuse_similarity_matrices`
+- 验证结果：
+  - `unittest discover -s tests -v`：`42/42` 通过
+  - `python -m compileall src scripts`：通过
+
+### Session 31
+
+- 已完成 `0.5/0.5` 的异构均值融合：
+  - `exp_034_ir101_vit_score_mean_fixed055`
+- 当前结果：
+  - `selected_threshold = 0.55`
+  - `val_accuracy = 0.9375`
+  - submission：`data/submissions/20260402_115747_exp_034_ir101_vit_score_mean_fixed055_submission.csv`
+- 相比 `exp_032`：
+  - 共 `7` 张预测变化
+  - 主要方向是把 `exp_032` 的接受拉回拒识：
+    - `1 -> 0`: `5`
+    - `2 -> 0`: `1`
+    - `0 -> 2`: `1`
+- 相比 `exp_019`：
+  - 只剩 `4` 张差异，全部是 `0 -> 1`
+- 结论：
+  - `0.5/0.5 mean` 明显把结果往 `IR101` 主线拖回去；
+  - 它会吐回 `exp_032` 已经拿到的一部分潜在收益，不值得直接提交。
+
+### Session 32
+
+- 已完成偏向 `ViT` 的异构均值融合：
+  - `exp_035_ir101_vit_score_mean_vit075_fixed055`
+- 当前结果：
+  - `selected_threshold = 0.55`
+  - `val_accuracy = 0.9375`
+  - submission：`data/submissions/20260402_120302_exp_035_ir101_vit_score_mean_vit075_fixed055_submission.csv`
+- 相比 `exp_032`：
+  - 共 `5` 张预测变化
+  - 仍然是在回收 `exp_032` 的接受：
+    - `1 -> 0`: `3`
+    - `2 -> 0`: `1`
+    - `0 -> 2`: `1`
+- 相比 `exp_034`：
+  - 只多恢复了 `2` 张 `0 -> 1`
+- 结论：
+  - 即使把权重压到 `IR101:ViT = 0.25:0.75`，线性均值融合仍然在损害 `exp_032` 的少量高价值修正；
+  - 当前证据不支持继续在线性 mean fusion 上扫更多权重；
+  - 若继续做融合，更值得尝试的是更偏 `ViT` 的非对称策略或非线性 gating，而不是继续做简单均值。

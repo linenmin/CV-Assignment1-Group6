@@ -1,0 +1,38 @@
+experiment_name: exp_029_ir101_adaface_haar_10ep_lookalike_prototype_fixed055
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+
+model:
+  family: cvlface
+  backbone_name: ir101
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_ir101_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: true
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 10
+  learning_rate: 0.0003
+  backbone_learning_rate: 0.00003
+  weight_decay: 0.0001
+  early_stopping_patience: 20
+
+augmentation:
+  use_horizontal_flip: false
+
+inference:
+  mode: lookalike_prototype
+  target_labels: [1, 2]
+  other_label: 0
+  threshold: 0.55
+  gallery_source: all_labeled
+  cluster_random_state: 42
+  michael_like_label: 3
+  sarah_like_label: 4

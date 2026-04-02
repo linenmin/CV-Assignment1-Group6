@@ -586,9 +586,247 @@
   2. 在现有 embedding 上，leave-one-out 依然会系统性奖励更松的接受边界；  
   3. 因而 verifier 方向在“当前实现版本”上可先视为负例，不值得继续用 Kaggle 提交去验证。
 
+### `exp_028` 当前结果
+
+- `exp_028_ir101_adaface_haar_10ep_ensemble_prototype_fixed055` 尝试对当前几条较强 checkpoint 做同 backbone embedding 平均：
+  - `exp_009`
+  - `exp_010`
+  - `exp_012`
+  - `exp_014`
+- 当前集成策略非常克制：
+  - 每个模型 embedding 先 `L2 normalize`
+  - 跨模型直接平均
+  - 再做一次 `L2 normalize`
+  - 推理仍然固定为 `single prototype + threshold=0.55`
+- 本地结果是：
+  - `val_accuracy = 0.875`
+- 相比 `exp_019`：
+  - 只改了 `20` 张预测
+  - 全部是把目标类更保守地推回 `other`：
+    - `1 -> 0`: `3`
+    - `2 -> 0`: `17`
+- 这轮的关键结论是：
+  1. 简单平均并没有形成有效互补，反而稀释了 `exp_009` 中最有任务特异性的偏移；  
+  2. 当前失败的不是“集成”这个思想，而是“同源 checkpoint 的朴素平均”；  
+  3. 因而后续若还考虑融合，必须要么换更异构的 backbone / 预训练来源，要么换更有针对性的融合方式，而不是继续堆同 backbone checkpoint。
+
+### `other` look-alike 结构诊断
+
+- 重新核对作业文本后，当前任务的一个关键事实已被确认：
+  - `other` 不是随机陌生人；
+  - 它由 `Michael Cera` 与 `Sarah Hyland` 两组 look-alike 构成。
+- 这意味着此前很多“generic other rejection”的建模假设并不完全贴题。  
+  更准确的任务结构是：
+  - `Jesse` vs `Michael-like`
+  - `Mila` vs `Sarah-like`
+  - 再加拒识
+- 为验证这一点，已用 `exp_009` 的 `all 80 labeled` embedding 对 `other=0` 的 `20` 张样本做 `k=2` 聚类。
+- 当前结果非常清楚：
+  - 两个簇各 `10` 张
+  - `silhouette_score = 0.3656`
+  - 一个簇显著更像 `Jesse`
+  - 一个簇显著更像 `Mila`
+- 两个簇的均值相似度为：
+  - `michael_like`:
+    - `mean_sim_to_jesse = 0.3316`
+    - `mean_sim_to_mila = 0.0618`
+  - `sarah_like`:
+    - `mean_sim_to_jesse = 0.0251`
+    - `mean_sim_to_mila = 0.3821`
+- 这个结果带来两个层面的判断：
+  1. **方向修正是成立的。**  
+     当前任务更像“look-alike-aware rejection”，而不是把所有 `other` 当作一个无结构类别。
+  2. **但增益量级不能高估。**  
+     当前训练集上的 look-alike 样本与目标 prototype 的相似度仍明显低于当前接受阈值 `0.55`。这说明 look-alike-aware inference 值得做，但更像是一个低风险诊断实验，而不是已经被证明的大幅涨分方向。
+
+### 当前综合判断（更新）
+
+- 现阶段最稳的基线仍然是 `exp_019 = 0.91685`。
+- 当前新的高价值信息不是“又找到了一个更复杂 scorer”，而是：
+  - `other` 内部确实有强结构；
+  - 且这个结构与目标人物一一对应。
+- 所以下一步最值得做的不是继续搜索新的 margin，而是：
+  - 先做**零新超参数**的 `4 prototype` 推理诊断：
+    - `Jesse`
+    - `Mila`
+    - `michael_like`
+    - `sarah_like`
+  - 再看相对 `exp_019` 的预测变化规模与方向；
+  - 只有在这个诊断版显示出足够多、且方向合理的修正后，才值得进一步做 `4 类训练` 或 `4 类 ArcFace`。
+
+### `exp_029` 当前结果
+
+- `exp_029_ir101_adaface_haar_10ep_lookalike_prototype_fixed055` 已完成上面这条零新超参数诊断：
+  - 继续复用 `exp_009` checkpoint
+  - 不重训
+  - 仅把 `other` 显式拆成 `michael_like` 与 `sarah_like` 两个 prototype
+  - 推理仍固定为 `threshold = 0.55`
+- 当前本地结果：
+  - `val_accuracy = 0.9375`
+  - `assigned_clusters = {michael_like_cluster_id: 1, sarah_like_cluster_id: 0}`
+  - `test_nearest_label_counts = {1:393, 2:525, 3:431, 4:467}`
+- 但最关键的不是这些统计，而是：
+  - **相对 `exp_019`，submission 逐行完全一致，差异条数为 `0`。**
+- 这给出了一个比聚类诊断更硬的结论：
+  1. 虽然 `other` 内部确实存在清晰的 look-alike 结构；  
+  2. 但在当前 `exp_009` embedding 和 `0.55` 接收阈值下，这个结构并没有穿过现有决策边界；  
+  3. 因而“显式建两个 look-alike prototype”不会改变任何测试预测。  
+- 更新后的判断是：
+  - 当前差距更可能来自 embedding 本身的表征上限、训练目标不对齐、或测试集中存在当前 prototype 规则无法触及的 harder cases；
+  - 而不是因为 `exp_019` 少建了两个 `other` 子原型。
+
+### `exp_030` 当前结果
+
+- `exp_030_ir101_adaface_haar_10ep_laststage_ft_arcface2_prototype_recalib` 尝试做一个受控的 metric-aligned pilot：
+  - backbone 与微调强度尽量沿用 `exp_009`
+  - 训练目标改为 `2 类 ArcFace`
+  - 只对 `Jesse / Mila` 计算 margin loss
+  - `other` 样本不参与 loss
+  - 推理仍回到 `prototype`，只做窄范围阈值重校准
+- 这条线的理论动机是对的：它直接攻击了“CE 训练目标与 cosine/prototype 推理不一致”这个结构性问题。
+- 但当前实测结果是负面的：
+  - `best_val_target_acc = 0.9167`
+  - `selected_threshold = 0.55`
+  - `val_accuracy = 0.9375`
+  - Kaggle public score = `0.76927`
+  - 相比 `exp_019`，有 `278` 张预测变化，而且**全部是更宽松的接收**：
+    - `195` 张 `0 -> 1`
+    - `83` 张 `0 -> 2`
+- 也就是说，这轮 ArcFace pilot 在当前实现下并没有学出更好的开放集分离，反而更像：
+  - 把目标类特征拉得更“吸附”
+  - 但没有同步学到对 `other` 的排斥
+  - 最终把大量原本该拒识的样本卷进来
+- 这轮带来的更新判断是：
+  1. 训练目标对齐仍然可能是对路方向；  
+  2. 但“2 类 ArcFace + 现有 prototype reject”这个最简组合在当前任务上不够；  
+  3. 如果后续继续走 metric-learning 线，必须显式补上 `other` 的拒识约束，而不能只优化 `Jesse / Mila` 两类的紧致度与分离度。  
+
+### `exp_031` 当前结果
+
+- `exp_031_ir50_adaface_haar_10ep_laststage_ft_prototype_fixed055` 是一个受控的 backbone 切换实验：
+  - 仅把 `IR101 AdaFace` 替换为 `IR50 AdaFace`
+  - 其他训练和推理协议尽量保持 `exp_009 / exp_019` 不变
+- 这条线的目的不是直接冲榜，而是判断：
+  - 当前问题是否主要来自 `IR101` 的容量/表征特点；
+  - 还是同家族 backbone 的切换本身就不足以带来真正新信息。
+- 当前结果是负面的：
+  - `best_val_acc = 0.9444`
+  - `val_accuracy = 0.875`
+  - 相比 `exp_019`，有 `237` 张预测变化，且几乎全部是更宽松的接收：
+    - `233` 张 `0 -> 1`
+    - `2` 张 `0 -> 2`
+    - `2` 张 `2 -> 0`
+- 这说明：
+  1. `IR50` 在当前协议下没有带来更强的 open-set 拒识；  
+  2. 它的行为模式和 `exp_030` 在方向上相似，都是更容易把 `other` 吸进去；  
+  3. 因而“同家族 iResNet 容量切换”不是当前最有希望的主杠杆。  
+- 更新后的判断是：
+  - 如果继续沿“新 backbone”这条轴推进，下一步不该再停留在同类 iResNet 上，而应优先考虑结构差异更大的 `ViT` 或其他异构 backbone。
+
 ### 当前综合判断
 
 - 经过 `exp_024 ~ exp_027` 这四轮离线实验后，可以把现阶段结论收紧成：
-  1. `exp_019 = 0.91685` 仍然是当前最强、最稳定、最值得保护的线上基线；  
+  1. `exp_019 = 0.91685` 曾是阶段性最强线上基线，但这个位置已经被 `exp_032 = 0.92180` 替代；  
   2. 小幅改造 open-set scorer，如果最终表现成“阈值更低、更多 `0 -> 1/2`”，基本都不值得提交；  
-  3. 当前最值得投入的下一个方向，不应该是继续微调 scorer，而应该是**更大步长的方法变化**，例如 score/model fusion，或者训练目标与开放集推理更一致的 metric-learning 式建模。
+  3. `exp_030 = 2 类 ArcFace` 已被线上 `0.76927` 明确证伪，因此“只优化 Jesse/Mila、不显式建模 other 拒识”的训练思路可以先停；  
+  4. 当前最值得投入的下一个方向，应该是**显式把 other 的排斥带进训练**，而不是继续微调 scorer。
+
+### `exp_032` 当前结果
+
+- `exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055` 是一个刻意压低工程量的 `ViT` 诊断实验：
+  - 使用 `minchul/cvlface_adaface_vit_base_webface4m`
+  - 不做 `ViT` 微调
+  - 仅用 `1 epoch` 头部训练产出可加载 checkpoint
+  - 实际关心的是 frozen `ViT` embedding 在 `prototype + threshold=0.55` 下的 open-set 行为
+- 这轮最重要的不是训练精度，而是 prototype 侧结果：
+  - `best_val_acc = 0.75`
+  - `val_accuracy = 0.9375`
+  - 相比 `exp_019`，submission 仅有 `11` 张差异：
+    - `9` 张 `0 -> 1`
+    - `1` 张 `0 -> 2`
+    - `1` 张 `2 -> 0`
+- 这个结果和 `exp_030 / exp_031` 很不一样：
+  - `exp_030` 与 `exp_031` 都表现成大规模放宽接收边界；
+  - `exp_032` 则几乎维持了 `exp_019` 的整体行为，只做了极小幅度的决策移动。
+- 这轮现在已经有线上结果：
+  - Kaggle public score = `0.92180`
+  - 相比 `exp_019 = 0.91685`，净提升 `+0.00495`
+- 这带来一个新的判断：
+  1. `ViT` 至少不是“预训练 embedding 完全不适合当前任务”的方向；  
+  2. 它在**不经过任何 backbone 微调**的情况下，不仅能逼近当前最佳离线协议，还在线上真正超过了 `IR101` 主线；  
+  3. 这说明当前 public leaderboard 更偏好 `ViT` 带来的那少量决策修正，而不是大幅改变边界；  
+  4. 因而 `ViT` 不再只是“值得继续投入”的候选，而是已经成为新的 strongest online baseline。  
+
+### 当前综合判断（更新）
+
+- 现在可以把方向判断再收紧一层：
+  1. `exp_019` 仍然是当前线上最强基线，不能轻易浪费提交配额去做高风险跳跃；  
+  2. `IR50` 与 `2 类 ArcFace` 已经给出负面信号，因此继续在“同家族 iResNet 容量切换”或“只训 Jesse/Mila”这两条线上投入，收益预期很低；  
+  3. frozen `ViT` 已给出足够接近 `exp_019` 的离线行为，这说明下一步最值得做的是 **`ViT fine-tune pilot`**，而不是回退到 all-80 final strategy 或继续改造 scorer；  
+  4. 这个 `ViT` 方向的价值不在于它已经证明会涨分，而在于它首次提供了一个**异构 backbone 且不明显退化**的新轴，值得继续用最小工程改动往前推一轮。  
+
+### `exp_033` 当前结果
+
+- `exp_033_vit_adaface_haar_3ep_lightft_prototype_recalib` 是对 `exp_032` 的直接跟进：
+  - 不再冻结 `ViT`
+  - 只用很小的 `backbone_learning_rate = 5e-6`
+  - 训练 `3` 个 epoch
+  - 同时检查阈值是否需要围绕 `0.55` 做小幅移动
+- 这轮给出了两个清晰信号：
+  1. **阈值确实发生了微调。**  
+     最优阈值从 `0.55` 移到了 `0.525`。
+  2. **但这种微调方向并不理想。**  
+     相比 `exp_019`，新的 submission 只多改了 `12` 张，而且全部是把 `other` 放宽为目标类：
+     - `10` 张 `0 -> 1`
+     - `2` 张 `0 -> 2`
+- 这说明：
+  - `ViT` 轻量微调确实让模型在封闭集分类意义上更快贴合了当前任务；
+  - 但这种贴合并没有转化成更强的 open-set prototype 行为；
+  - 当前最直接的表现仍然是“把接受边界推松了一点”。  
+
+### 当前综合判断（再次更新）
+
+- 现在可以更明确地收敛到下面这几点：
+  1. `exp_032 = 0.92180` 已经证明 frozen `ViT` 不是陪跑，而是当前最强线上方案；  
+  2. `exp_033` 表明继续把 `ViT` 单模型往轻量 fine-tune 推进，并不会自然带来更好的 open-set 行为，反而更像把边界轻微放松；  
+  3. 这意味着当前最值得保护的不是 `exp_019`，而是 `exp_032` 这条“frozen ViT + fixed 0.55”主线；  
+  4. 下一步最值得尝试的，是以 `exp_032` 为 anchor，做 `exp_032 (ViT) + exp_019 (IR101)` 的异构融合，而不是继续单独深挖 `ViT fine-tune` 或回退到 all-80。  
+
+### `exp_034` 当前结果
+
+- `exp_034_ir101_vit_score_mean_fixed055` 采用最保守的首发融合方案：
+  - `IR101 + frozen ViT`
+  - score-level `mean`
+  - 固定阈值 `0.55`
+- 当前本地结果：
+  - `val_accuracy = 0.9375`
+  - 相比 `exp_032`，有 `7` 张预测变化：
+    - `5` 张 `1 -> 0`
+    - `1` 张 `2 -> 0`
+    - `1` 张 `0 -> 2`
+- 这说明首发的 `0.5/0.5` 线性平均并没有保护 `exp_032` 的收益，反而把它往 `IR101` 那条更保守的边界拉回去了。
+
+### `exp_035` 当前结果
+
+- `exp_035_ir101_vit_score_mean_vit075_fixed055` 进一步把权重偏向当前线上最优的 `ViT`：
+  - `IR101:ViT = 0.25:0.75`
+  - 其余协议不变
+- 当前本地结果：
+  - `val_accuracy = 0.9375`
+  - 相比 `exp_032`，仍有 `5` 张预测变化：
+    - `3` 张 `1 -> 0`
+    - `1` 张 `2 -> 0`
+    - `1` 张 `0 -> 2`
+- 这比 `exp_034` 稍好，但方向没有变：
+  - 线性均值融合依旧在吞掉 `exp_032` 的少量高价值接受。
+
+### 当前综合判断（最终更新）
+
+- 现在已经可以把融合方向也收紧：
+  1. `exp_032` 的优势不是“大幅重排预测”，而是少量高价值修正；  
+  2. 因而任何把分数往 `IR101` 拉回去的线性平均，都很容易把这些修正吞掉；  
+  3. `exp_034` 与 `exp_035` 已经给出足够一致的证据，说明**当前不值得继续扫线性 mean fusion 权重**；  
+  4. 如果还要继续做异构融合，更合理的下一步应是：
+     - 更偏 `ViT` 的保守 gating
+     - 或直接以 `exp_032` 为 anchor，只在少量高分歧样本上引入 `IR101` 作为二次裁决  
+  5. 在没有更强证据前，`exp_032 = 0.92180` 仍应被视为当前最值得保护和提交对照的主线。  

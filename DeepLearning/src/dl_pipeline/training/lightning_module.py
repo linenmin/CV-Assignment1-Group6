@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 
-from dl_pipeline.models.classifier import build_classifier
+from dl_pipeline.models.classifier import ArcFaceHead, build_classifier
 
 
 class FaceClassifierModule(L.LightningModule):
@@ -28,6 +28,10 @@ class FaceClassifierModule(L.LightningModule):
         freeze_backbone: bool = False,
         unfreeze_last_stage: bool = False,
         unfreeze_stage_count: int = 0,
+        loss_name: str = "cross_entropy",
+        loss_target_labels: list[int] | None = None,
+        arcface_scale: float = 30.0,
+        arcface_margin: float = 0.5,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -43,8 +47,29 @@ class FaceClassifierModule(L.LightningModule):
             unfreeze_stage_count=unfreeze_stage_count,
         )
         self.criterion = nn.CrossEntropyLoss()
-        self.val_acc = MulticlassAccuracy(num_classes=num_classes)
-        self.val_f1 = MulticlassF1Score(num_classes=num_classes, average="macro")
+        self.loss_name = loss_name
+        self.loss_target_labels = list(loss_target_labels or [])
+        self.loss_target_label_to_index = {
+            int(label): index for index, label in enumerate(self.loss_target_labels)
+        }
+
+        if self.loss_name == "arcface":
+            if len(self.loss_target_labels) < 2:
+                raise ValueError("ArcFace 模式至少需要两个 target labels。")
+            self.arcface_head = ArcFaceHead(
+                in_features=self._resolve_feature_dim(),
+                num_classes=len(self.loss_target_labels),
+                scale=arcface_scale,
+                margin=arcface_margin,
+            )
+            self.val_target_acc = MulticlassAccuracy(num_classes=len(self.loss_target_labels))
+            self.val_target_f1 = MulticlassF1Score(
+                num_classes=len(self.loss_target_labels),
+                average="macro",
+            )
+        else:
+            self.val_acc = MulticlassAccuracy(num_classes=num_classes)
+            self.val_f1 = MulticlassF1Score(num_classes=num_classes, average="macro")
 
     def forward(self, images):
         return self.model(images)
@@ -59,23 +84,104 @@ class FaceClassifierModule(L.LightningModule):
             return features
         raise ValueError("当前模型不支持提取 embedding 特征。")
 
+    def _resolve_feature_dim(self) -> int:
+        classifier = getattr(self.model, "classifier", None)
+        if isinstance(classifier, nn.Sequential) and len(classifier) > 0 and hasattr(classifier[-1], "in_features"):
+            return int(classifier[-1].in_features)
+        if hasattr(classifier, "in_features"):
+            return int(classifier.in_features)
+        raise ValueError("无法解析模型 feature dim，不能构建 ArcFace head。")
+
+    def _select_arcface_targets(
+        self,
+        features: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.loss_target_labels:
+            raise ValueError("ArcFace 模式缺少 target labels。")
+
+        selected_feature_list = []
+        selected_label_list = []
+        for raw_label, mapped_label in self.loss_target_label_to_index.items():
+            current_mask = labels == raw_label
+            if current_mask.any():
+                selected_feature_list.append(features[current_mask])
+                selected_label_list.append(
+                    torch.full(
+                        (int(current_mask.sum().item()),),
+                        mapped_label,
+                        device=labels.device,
+                        dtype=torch.long,
+                    )
+                )
+
+        if not selected_feature_list:
+            return (
+                torch.empty((0, features.shape[1]), device=features.device, dtype=features.dtype),
+                torch.empty((0,), device=labels.device, dtype=torch.long),
+            )
+
+        return torch.cat(selected_feature_list, dim=0), torch.cat(selected_label_list, dim=0)
+
+    def _compute_loss_and_predictions(
+        self,
+        images: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        if self.loss_name != "arcface":
+            logits = self(images)
+            loss = self.criterion(logits, labels)
+            preds = torch.argmax(logits, dim=1)
+            return loss, preds, labels, int(labels.shape[0])
+
+        features = self.extract_features(images)
+        target_features, target_labels = self._select_arcface_targets(features, labels)
+        if target_labels.numel() == 0:
+            zero_loss = features.sum() * 0.0
+            empty_preds = torch.empty((0,), device=labels.device, dtype=torch.long)
+            return zero_loss, empty_preds, target_labels, 0
+
+        logits = self.arcface_head(target_features, target_labels)
+        loss = self.criterion(logits, target_labels)
+        preds = torch.argmax(logits, dim=1)
+        return loss, preds, target_labels, int(target_labels.shape[0])
+
     def training_step(self, batch, batch_idx):
         images, labels = batch
-        logits = self(images)
-        loss = self.criterion(logits, labels)
-        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        loss, _, _, batch_size = self._compute_loss_and_predictions(images, labels)
+        self.log(
+            "train_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=max(batch_size, 1),
+        )
         return loss
 
     def validation_step(self, batch, batch_idx):
         images, labels = batch
-        logits = self(images)
-        loss = self.criterion(logits, labels)
-        preds = torch.argmax(logits, dim=1)
-        self.val_acc.update(preds, labels)
-        self.val_f1.update(preds, labels)
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        loss, preds, metric_labels, batch_size = self._compute_loss_and_predictions(images, labels)
+        if self.loss_name == "arcface":
+            if batch_size == 0:
+                return
+            self.val_target_acc.update(preds, metric_labels)
+            self.val_target_f1.update(preds, metric_labels)
+            self.log("val_target_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+            return
+
+        self.val_acc.update(preds, metric_labels)
+        self.val_f1.update(preds, metric_labels)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
 
     def on_validation_epoch_end(self):
+        if self.loss_name == "arcface":
+            self.log("val_target_acc", self.val_target_acc.compute(), prog_bar=True)
+            self.log("val_target_f1", self.val_target_f1.compute(), prog_bar=True)
+            self.val_target_acc.reset()
+            self.val_target_f1.reset()
+            return
+
         self.log("val_acc", self.val_acc.compute(), prog_bar=True)
         self.log("val_f1", self.val_f1.compute(), prog_bar=True)
         self.val_acc.reset()

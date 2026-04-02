@@ -11,6 +11,17 @@ def _normalize_embeddings(embeddings: torch.Tensor) -> torch.Tensor:
     return F.normalize(embeddings, p=2, dim=1)
 
 
+def average_normalized_embedding_sets(
+    embedding_sets: list[torch.Tensor],
+) -> torch.Tensor:
+    if not embedding_sets:
+        raise ValueError("embedding_sets 不能为空。")
+
+    normalized_sets = [_normalize_embeddings(embeddings) for embeddings in embedding_sets]
+    mean_embeddings = torch.stack(normalized_sets, dim=0).mean(dim=0)
+    return _normalize_embeddings(mean_embeddings)
+
+
 def combine_embedding_sets(
     embedding_sets: list[tuple[torch.Tensor, torch.Tensor]],
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -26,20 +37,96 @@ def _compute_best_scores(
     query_embeddings: torch.Tensor,
     prototypes: dict[int, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    similarity_matrix, prototype_labels = compute_similarity_matrix(query_embeddings, prototypes)
+    return _best_scores_from_similarity_matrix(similarity_matrix, prototype_labels)
+
+
+def compute_similarity_matrix(
+    query_embeddings: torch.Tensor,
+    prototypes: dict[int, torch.Tensor],
+    prototype_labels: list[int] | None = None,
+) -> tuple[torch.Tensor, list[int]]:
     if not prototypes:
         raise ValueError("prototypes 不能为空。")
 
+    ordered_labels = list(prototype_labels) if prototype_labels is not None else list(prototypes.keys())
+    missing_labels = [label for label in ordered_labels if label not in prototypes]
+    if missing_labels:
+        raise ValueError(f"prototypes 缺少标签: {missing_labels}")
+
     normalized_queries = _normalize_embeddings(query_embeddings)
-    prototype_labels = list(prototypes.keys())
-    prototype_matrix = torch.stack([prototypes[label] for label in prototype_labels], dim=0)
+    prototype_matrix = _normalize_embeddings(
+        torch.stack([prototypes[label] for label in ordered_labels], dim=0)
+    )
     similarities = normalized_queries @ prototype_matrix.T
-    best_scores, best_indices = similarities.max(dim=1)
+    return similarities, ordered_labels
+
+
+def _best_scores_from_similarity_matrix(
+    similarity_matrix: torch.Tensor,
+    prototype_labels: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if similarity_matrix.ndim != 2:
+        raise ValueError("similarity_matrix 必须是二维张量。")
+    if not prototype_labels:
+        raise ValueError("prototype_labels 不能为空。")
+    if similarity_matrix.shape[1] != len(prototype_labels):
+        raise ValueError("similarity_matrix 列数必须与 prototype_labels 数量一致。")
+
+    best_scores, best_indices = similarity_matrix.max(dim=1)
     predicted_labels = torch.tensor(
         [prototype_labels[index] for index in best_indices.tolist()],
-        device=query_embeddings.device,
+        device=similarity_matrix.device,
         dtype=torch.long,
     )
     return predicted_labels, best_scores
+
+
+def predict_open_set_from_similarity_matrix(
+    similarity_matrix: torch.Tensor,
+    prototype_labels: list[int],
+    other_label: int,
+    threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    predicted_labels, best_scores = _best_scores_from_similarity_matrix(
+        similarity_matrix,
+        prototype_labels,
+    )
+    predictions = predicted_labels.clone()
+    predictions[best_scores < threshold] = other_label
+    return predictions, best_scores
+
+
+def fuse_similarity_matrices(
+    similarity_matrices: list[torch.Tensor],
+    method: str,
+    weights: list[float] | None = None,
+) -> torch.Tensor:
+    if not similarity_matrices:
+        raise ValueError("similarity_matrices 不能为空。")
+
+    reference_shape = similarity_matrices[0].shape
+    if any(matrix.shape != reference_shape for matrix in similarity_matrices):
+        raise ValueError("所有 similarity_matrix 的形状必须一致。")
+
+    stacked = torch.stack(similarity_matrices, dim=0)
+    if method == "mean":
+        if weights is None:
+            return stacked.mean(dim=0)
+        if len(weights) != len(similarity_matrices):
+            raise ValueError("weights 数量必须与 similarity_matrices 数量一致。")
+        weight_tensor = torch.tensor(
+            weights,
+            device=stacked.device,
+            dtype=stacked.dtype,
+        )
+        normalized_weights = weight_tensor / weight_tensor.sum().clamp_min(1e-12)
+        return (stacked * normalized_weights.view(-1, 1, 1)).sum(dim=0)
+
+    if method == "min":
+        return stacked.min(dim=0).values
+
+    raise ValueError(f"未知的 fusion method: {method}")
 
 
 def _mean_topk_similarity(
@@ -108,10 +195,13 @@ def predict_open_set(
     other_label: int,
     threshold: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    predicted_labels, best_scores = _compute_best_scores(query_embeddings, prototypes)
-    predictions = predicted_labels.clone()
-    predictions[best_scores < threshold] = other_label
-    return predictions, best_scores
+    similarity_matrix, prototype_labels = compute_similarity_matrix(query_embeddings, prototypes)
+    return predict_open_set_from_similarity_matrix(
+        similarity_matrix=similarity_matrix,
+        prototype_labels=prototype_labels,
+        other_label=other_label,
+        threshold=threshold,
+    )
 
 
 def predict_open_set_with_class_thresholds(
@@ -131,6 +221,35 @@ def predict_open_set_with_class_thresholds(
         if best_scores[index].item() < thresholds_by_class[predicted_label]:
             predictions[index] = other_label
     return predictions, best_scores
+
+
+def predict_open_set_with_lookalikes(
+    query_embeddings: torch.Tensor,
+    prototypes: dict[int, torch.Tensor],
+    target_labels: list[int],
+    lookalike_labels: list[int],
+    other_label: int,
+    threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not target_labels:
+        raise ValueError("target_labels 不能为空。")
+    if not lookalike_labels:
+        raise ValueError("lookalike_labels 不能为空。")
+
+    required_labels = set(target_labels) | set(lookalike_labels)
+    missing_labels = [label for label in required_labels if label not in prototypes]
+    if missing_labels:
+        raise ValueError(f"prototypes 缺少标签: {missing_labels}")
+
+    nearest_labels, best_scores = _compute_best_scores(
+        query_embeddings,
+        {label: prototypes[label] for label in target_labels + lookalike_labels},
+    )
+    predictions = torch.full_like(nearest_labels, other_label)
+    target_mask = torch.isin(nearest_labels, torch.tensor(target_labels, device=nearest_labels.device))
+    accept_mask = target_mask & (best_scores >= threshold)
+    predictions[accept_mask] = nearest_labels[accept_mask]
+    return predictions, nearest_labels, best_scores
 
 
 def predict_open_set_with_exemplars(

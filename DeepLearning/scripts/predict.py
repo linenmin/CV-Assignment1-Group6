@@ -9,6 +9,7 @@ import sys
 import lightning as L
 import pandas as pd
 import torch
+from sklearn.cluster import KMeans
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -17,8 +18,10 @@ from dl_pipeline.common.paths import project_path
 from dl_pipeline.common.registry import append_registry_row
 from dl_pipeline.data.datamodule import FaceDataModule
 from dl_pipeline.inference.prototype import (
+    average_normalized_embedding_sets,
     combine_embedding_sets,
     compute_class_prototypes,
+    predict_open_set_with_lookalikes,
     predict_open_set_with_quality_aware_scorer,
     predict_open_set_with_richer_scorer,
     predict_open_set_with_verifiers,
@@ -48,6 +51,32 @@ def _collect_embeddings(model, dataloader, device):
             embeddings.append(features.detach().cpu())
             values.append(batch_values.detach().cpu())
     return torch.cat(embeddings, dim=0), torch.cat(values, dim=0)
+
+
+def _load_model_from_checkpoint(config, checkpoint_path: str):
+    train_df = pd.read_csv(project_path(config["data"]["splits_dir"]) / "train.csv")
+    loss_config = config.get("loss", {})
+    return FaceClassifierModule.load_from_checkpoint(
+        checkpoint_path,
+        model_family=config["model"]["family"],
+        backbone_name=config["model"]["backbone_name"],
+        num_classes=int(train_df["class"].nunique()),
+        pretrained=config["model"]["pretrained"],
+        dropout=config["model"]["dropout"],
+        learning_rate=config["train"]["learning_rate"],
+        backbone_learning_rate=config["train"].get("backbone_learning_rate"),
+        weight_decay=config["train"]["weight_decay"],
+        scheduler_name=config["train"]["scheduler"],
+        max_epochs=config["train"]["max_epochs"],
+        pretrained_repo_id=config["model"].get("pretrained_repo_id"),
+        freeze_backbone=config["model"].get("freeze_backbone", False),
+        unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
+        unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
+        loss_name=loss_config.get("name", "cross_entropy"),
+        loss_target_labels=loss_config.get("target_labels"),
+        arcface_scale=loss_config.get("arcface_scale", 30.0),
+        arcface_margin=loss_config.get("arcface_margin", 0.5),
+    )
 
 
 def _run_prototype_inference(config, datamodule, model, test_df, output_root: Path):
@@ -168,6 +197,76 @@ def _run_prototype_inference(config, datamodule, model, test_df, output_root: Pa
     )
 
     id_to_prediction = {int(sample_id): int(pred) for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())}
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
+def _run_ensemble_prototype_inference(config, datamodule, test_df, output_root: Path):
+    inference_config = config.get("inference", {})
+    prototype_labels = inference_config.get("prototype_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    threshold = inference_config.get("threshold", 0.55)
+    checkpoint_paths = inference_config.get("checkpoint_paths", [])
+    if not checkpoint_paths:
+        raise ValueError("ensemble_prototype 模式必须提供 checkpoint_paths。")
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+
+    train_embedding_sets: list[torch.Tensor] = []
+    val_embedding_sets: list[torch.Tensor] = []
+    test_embedding_sets: list[torch.Tensor] = []
+    train_labels = val_labels = test_ids = None
+
+    for checkpoint_path in checkpoint_paths:
+        model = _load_model_from_checkpoint(config, checkpoint_path).to(device)
+        current_train_embeddings, current_train_labels = _collect_embeddings(model, datamodule.train_dataloader(), device)
+        current_val_embeddings, current_val_labels = _collect_embeddings(model, datamodule.val_dataloader(), device)
+        current_test_embeddings, current_test_ids = _collect_embeddings(model, datamodule.predict_dataloader(), device)
+        train_embedding_sets.append(current_train_embeddings)
+        val_embedding_sets.append(current_val_embeddings)
+        test_embedding_sets.append(current_test_embeddings)
+        if train_labels is None:
+            train_labels = current_train_labels
+            val_labels = current_val_labels
+            test_ids = current_test_ids
+
+    train_embeddings = average_normalized_embedding_sets(train_embedding_sets)
+    val_embeddings = average_normalized_embedding_sets(val_embedding_sets)
+    test_embeddings = average_normalized_embedding_sets(test_embedding_sets)
+
+    prototypes = compute_class_prototypes(train_embeddings, train_labels, prototype_labels=prototype_labels)
+    val_predictions, _ = predict_open_set(
+        val_embeddings,
+        prototypes=prototypes,
+        other_label=other_label,
+        threshold=threshold,
+    )
+    val_accuracy = (val_predictions == val_labels).float().mean().item()
+    test_predictions, _ = predict_open_set(
+        test_embeddings,
+        prototypes=prototypes,
+        other_label=other_label,
+        threshold=threshold,
+    )
+
+    ensemble_metrics = {
+        "mode": "ensemble_prototype",
+        "prototype_labels": prototype_labels,
+        "other_label": other_label,
+        "selected_threshold": threshold,
+        "checkpoint_paths": checkpoint_paths,
+        "num_models": len(checkpoint_paths),
+        "val_accuracy": val_accuracy,
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(ensemble_metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred)
+        for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
     return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
 
 
@@ -485,6 +584,148 @@ def _run_verifier_open_set_inference(config, datamodule, model, test_df, output_
     return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
 
 
+def _run_lookalike_prototype_inference(config, datamodule, model, test_df, output_root: Path):
+    inference_config = config.get("inference", {})
+    target_labels = inference_config.get("target_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    threshold = inference_config.get("threshold", 0.55)
+    gallery_source = inference_config.get("gallery_source", "all_labeled")
+    cluster_random_state = inference_config.get("cluster_random_state", 42)
+    michael_like_label = inference_config.get("michael_like_label", 3)
+    sarah_like_label = inference_config.get("sarah_like_label", 4)
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model = model.to(device)
+
+    train_embeddings, train_labels = _collect_embeddings(model, datamodule.train_dataloader(), device)
+    val_embeddings, val_labels = _collect_embeddings(model, datamodule.val_dataloader(), device)
+    test_embeddings, test_ids = _collect_embeddings(model, datamodule.predict_dataloader(), device)
+    gallery_embeddings, gallery_labels = train_embeddings, train_labels
+    if gallery_source == "all_labeled":
+        gallery_embeddings, gallery_labels = combine_embedding_sets(
+            [
+                (train_embeddings, train_labels),
+                (val_embeddings, val_labels),
+            ]
+        )
+
+    target_prototypes = compute_class_prototypes(
+        gallery_embeddings,
+        gallery_labels,
+        prototype_labels=target_labels,
+    )
+
+    other_embeddings = gallery_embeddings[gallery_labels == other_label]
+    if other_embeddings.shape[0] < 2:
+        raise ValueError("lookalike_prototype 模式要求 other 类至少有 2 个样本。")
+    normalized_other_embeddings = torch.nn.functional.normalize(other_embeddings, p=2, dim=1)
+    cluster_ids = KMeans(
+        n_clusters=2,
+        random_state=cluster_random_state,
+        n_init=50,
+    ).fit_predict(normalized_other_embeddings.cpu().numpy())
+    cluster_ids_tensor = torch.as_tensor(cluster_ids, dtype=torch.long)
+
+    cluster_records = []
+    for cluster_id in sorted(set(cluster_ids)):
+        cluster_embeddings = normalized_other_embeddings[cluster_ids_tensor == cluster_id]
+        cluster_prototype = torch.nn.functional.normalize(
+            cluster_embeddings.mean(dim=0, keepdim=True),
+            p=2,
+            dim=1,
+        ).squeeze(0)
+        mean_sim_to_target = {
+            int(label): float(torch.dot(cluster_prototype, target_prototypes[label]).item())
+            for label in target_labels
+        }
+        cluster_records.append(
+            {
+                "cluster_id": int(cluster_id),
+                "prototype": cluster_prototype,
+                "mean_sim_to_target": mean_sim_to_target,
+                "margin_target_1_minus_2": float(
+                    mean_sim_to_target[target_labels[0]] - mean_sim_to_target[target_labels[1]]
+                ),
+                "count": int((cluster_ids_tensor == cluster_id).sum().item()),
+            }
+        )
+
+    jesse_like_cluster = max(cluster_records, key=lambda item: item["margin_target_1_minus_2"])
+    mila_like_cluster = min(cluster_records, key=lambda item: item["margin_target_1_minus_2"])
+    prototypes = {
+        int(target_labels[0]): target_prototypes[target_labels[0]],
+        int(target_labels[1]): target_prototypes[target_labels[1]],
+        int(michael_like_label): jesse_like_cluster["prototype"],
+        int(sarah_like_label): mila_like_cluster["prototype"],
+    }
+
+    lookalike_labels = [int(michael_like_label), int(sarah_like_label)]
+    val_predictions, val_nearest_labels, val_scores = predict_open_set_with_lookalikes(
+        query_embeddings=val_embeddings,
+        prototypes=prototypes,
+        target_labels=target_labels,
+        lookalike_labels=lookalike_labels,
+        other_label=other_label,
+        threshold=threshold,
+    )
+    val_accuracy = (val_predictions == val_labels).float().mean().item()
+    test_predictions, test_nearest_labels, test_scores = predict_open_set_with_lookalikes(
+        query_embeddings=test_embeddings,
+        prototypes=prototypes,
+        target_labels=target_labels,
+        lookalike_labels=lookalike_labels,
+        other_label=other_label,
+        threshold=threshold,
+    )
+
+    metrics = {
+        "mode": "lookalike_prototype",
+        "target_labels": target_labels,
+        "other_label": other_label,
+        "gallery_source": gallery_source,
+        "selected_threshold": float(threshold),
+        "lookalike_labels": {
+            "michael_like": int(michael_like_label),
+            "sarah_like": int(sarah_like_label),
+        },
+        "cluster_random_state": int(cluster_random_state),
+        "cluster_summary": [
+            {
+                "cluster_id": int(item["cluster_id"]),
+                "count": int(item["count"]),
+                "mean_sim_to_target": item["mean_sim_to_target"],
+                "margin_target_1_minus_2": float(item["margin_target_1_minus_2"]),
+            }
+            for item in cluster_records
+        ],
+        "assigned_clusters": {
+            "michael_like_cluster_id": int(jesse_like_cluster["cluster_id"]),
+            "sarah_like_cluster_id": int(mila_like_cluster["cluster_id"]),
+        },
+        "val_accuracy": float(val_accuracy),
+        "val_nearest_label_counts": {
+            str(label): int((val_nearest_labels == label).sum().item())
+            for label in sorted(set(val_nearest_labels.tolist()))
+        },
+        "test_nearest_label_counts": {
+            str(label): int((test_nearest_labels == label).sum().item())
+            for label in sorted(set(test_nearest_labels.tolist()))
+        },
+        "mean_test_best_score": float(test_scores.mean().item()),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred)
+        for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="加载最佳模型并生成 submission.csv。")
     parser.add_argument("--config", required=True)
@@ -494,9 +735,11 @@ def main() -> None:
     config = load_experiment_config(args.config)
     splits_dir = project_path(config["data"]["splits_dir"])
     output_root = project_path("outputs", config["experiment_name"])
+    loss_config = config.get("loss", {})
 
+    inference_mode = config.get("inference", {}).get("mode", "softmax")
     checkpoint_path = args.checkpoint
-    if checkpoint_path is None:
+    if checkpoint_path is None and inference_mode != "ensemble_prototype":
         metrics_path = output_root / "metrics.json"
         if not metrics_path.exists():
             raise FileNotFoundError("未找到 metrics.json，无法自动定位最佳模型。")
@@ -516,23 +759,29 @@ def main() -> None:
     )
     datamodule.setup()
 
-    model = FaceClassifierModule.load_from_checkpoint(
-        checkpoint_path,
-        model_family=config["model"]["family"],
-        backbone_name=config["model"]["backbone_name"],
-        num_classes=int(train_df["class"].nunique()),
-        pretrained=config["model"]["pretrained"],
-        dropout=config["model"]["dropout"],
-        learning_rate=config["train"]["learning_rate"],
-        backbone_learning_rate=config["train"].get("backbone_learning_rate"),
-        weight_decay=config["train"]["weight_decay"],
-        scheduler_name=config["train"]["scheduler"],
-        max_epochs=config["train"]["max_epochs"],
-        pretrained_repo_id=config["model"].get("pretrained_repo_id"),
-        freeze_backbone=config["model"].get("freeze_backbone", False),
-        unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
-        unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
-    )
+    model = None
+    if inference_mode != "ensemble_prototype":
+        model = FaceClassifierModule.load_from_checkpoint(
+            checkpoint_path,
+            model_family=config["model"]["family"],
+            backbone_name=config["model"]["backbone_name"],
+            num_classes=int(train_df["class"].nunique()),
+            pretrained=config["model"]["pretrained"],
+            dropout=config["model"]["dropout"],
+            learning_rate=config["train"]["learning_rate"],
+            backbone_learning_rate=config["train"].get("backbone_learning_rate"),
+            weight_decay=config["train"]["weight_decay"],
+            scheduler_name=config["train"]["scheduler"],
+            max_epochs=config["train"]["max_epochs"],
+            pretrained_repo_id=config["model"].get("pretrained_repo_id"),
+            freeze_backbone=config["model"].get("freeze_backbone", False),
+            unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
+            unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
+            loss_name=loss_config.get("name", "cross_entropy"),
+            loss_target_labels=loss_config.get("target_labels"),
+            arcface_scale=loss_config.get("arcface_scale", 30.0),
+            arcface_margin=loss_config.get("arcface_margin", 0.5),
+        )
 
     trainer = L.Trainer(
         accelerator=config["train"]["accelerator"],
@@ -543,9 +792,10 @@ def main() -> None:
         enable_progress_bar=True,
         enable_model_summary=False,
     )
-    inference_mode = config.get("inference", {}).get("mode", "softmax")
     if inference_mode == "prototype":
         ordered_predictions = _run_prototype_inference(config, datamodule, model, test_df, output_root)
+    elif inference_mode == "ensemble_prototype":
+        ordered_predictions = _run_ensemble_prototype_inference(config, datamodule, test_df, output_root)
     elif inference_mode == "exemplar_knn":
         ordered_predictions = _run_exemplar_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "richer_open_set":
@@ -554,6 +804,8 @@ def main() -> None:
         ordered_predictions = _run_quality_aware_open_set_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "verifier_open_set":
         ordered_predictions = _run_verifier_open_set_inference(config, datamodule, model, test_df, output_root)
+    elif inference_mode == "lookalike_prototype":
+        ordered_predictions = _run_lookalike_prototype_inference(config, datamodule, model, test_df, output_root)
     else:
         outputs = trainer.predict(model, datamodule=datamodule)
 
@@ -579,7 +831,7 @@ def main() -> None:
             "experiment_name": config["experiment_name"],
             "stage": "predict",
             "submission_path": str(submission_path),
-            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_path": str(checkpoint_path or json.dumps(config.get("inference", {}).get("checkpoint_paths", []))),
         },
     )
     print(f"submission 已生成: {submission_path}")

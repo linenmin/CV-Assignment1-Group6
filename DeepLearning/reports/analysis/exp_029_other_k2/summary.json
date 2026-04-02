@@ -1,0 +1,32 @@
+{
+  "checkpoint": "exp_009_ir101_adaface_haar_10ep_laststage_ft/best.ckpt",
+  "num_labeled": 80,
+  "num_other": 20,
+  "silhouette_score": 0.36560916900634766,
+  "cluster_summary": [
+    {
+      "cluster": 0,
+      "count": 10,
+      "mean_sim_to_jesse": 0.025069549679756165,
+      "mean_sim_to_mila": 0.38213011622428894,
+      "mean_margin_jesse_minus_mila": -0.35706058144569397,
+      "assigned_group": "sarah_like",
+      "train_count": 7,
+      "val_count": 3
+    },
+    {
+      "cluster": 1,
+      "count": 10,
+      "mean_sim_to_jesse": 0.3316141963005066,
+      "mean_sim_to_mila": 0.06176638603210449,
+      "mean_margin_jesse_minus_mila": 0.2698478102684021,
+      "assigned_group": "michael_like",
+      "train_count": 9,
+      "val_count": 1
+    }
+  ],
+  "pca_explained_variance_ratio": [
+    0.3421524167060852,
+    0.1258649379014969
+  ]
+}

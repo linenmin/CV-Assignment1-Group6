@@ -1,0 +1,17 @@
+experiment_name: exp_034_ir101_vit_score_mean_fixed055
+
+data:
+  splits_dir: data/splits/exp_001
+
+fusion:
+  method: mean
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold_values: [0.55]
+  members:
+    - name: ir101
+      config_path: configs/experiments/exp_019_ir101_adaface_haar_10ep_laststage_ft_prototype_fixed055.yaml
+      checkpoint_path: outputs/exp_009_ir101_adaface_haar_10ep_laststage_ft/checkpoints/best.ckpt
+    - name: vit_frozen
+      config_path: configs/experiments/exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055.yaml
+      checkpoint_path: outputs/exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055/checkpoints/best.ckpt
