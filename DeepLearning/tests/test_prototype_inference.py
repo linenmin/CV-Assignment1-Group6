@@ -6,10 +6,15 @@ from sklearn.model_selection import StratifiedKFold
 from dl_pipeline.inference.prototype import (
     average_normalized_embedding_sets,
     combine_embedding_sets,
+    conservative_graph_refine_predictions,
     compute_similarity_matrix,
     compute_class_prototypes,
     fuse_similarity_matrices,
+    global_label_spread_predictions,
+    neighborhood_aware_predictions,
+    pca_whiten_embedding_sets,
     predict_open_set_with_lookalikes,
+    predict_open_set_with_lookalike_margin_rejection,
     predict_open_set_with_quality_aware_scorer,
     predict_open_set_with_richer_scorer,
     predict_open_set_with_verifiers,
@@ -17,6 +22,7 @@ from dl_pipeline.inference.prototype import (
     predict_open_set,
     predict_open_set_from_similarity_matrix,
     predict_open_set_with_class_thresholds,
+    spectral_cluster_with_gallery_label_matching,
     select_best_quality_aware_params_leave_one_out,
     select_best_richer_scorer_params_leave_one_out,
     select_best_verifier_thresholds_leave_one_out,
@@ -28,6 +34,271 @@ from dl_pipeline.inference.prototype import (
 
 
 class PrototypeInferenceTests(unittest.TestCase):
+    def test_neighborhood_aware_predictions_can_rescue_reject_via_neighbor_scores(self):
+        prototypes = {
+            1: torch.tensor([1.0, 0.0]),
+            2: torch.tensor([-1.0, 0.0]),
+        }
+        query_embeddings = torch.tensor(
+            [
+                [0.60, 0.80],  # base reject under a stricter threshold, but near strong accepted neighbors
+                [1.00, 0.10],
+                [1.00, -0.10],
+                [0.00, -1.00],
+            ],
+            dtype=torch.float32,
+        )
+
+        predictions, base_scores, neighbor_scores, final_scores = neighborhood_aware_predictions(
+            query_embeddings=query_embeddings,
+            prototypes=prototypes,
+            other_label=0,
+            threshold=0.75,
+            top_k=1,
+            base_weight=0.5,
+        )
+
+        self.assertEqual(predictions.tolist(), [1, 1, 1, 0])
+        self.assertLess(base_scores[0].item(), 0.75)
+        self.assertGreater(neighbor_scores[0].item(), 0.75)
+        self.assertGreaterEqual(final_scores[0].item(), 0.75)
+
+    def test_spectral_cluster_with_gallery_label_matching_assigns_clusters_from_gallery_neighbors(self):
+        gallery_embeddings = torch.tensor(
+            [
+                [1.00, 0.00],
+                [0.95, 0.05],
+                [0.00, 1.00],
+                [0.05, 0.95],
+                [-1.00, 0.00],
+                [-0.95, -0.05],
+            ],
+            dtype=torch.float32,
+        )
+        gallery_labels = torch.tensor([1, 1, 2, 2, 0, 0], dtype=torch.long)
+        query_embeddings = torch.tensor(
+            [
+                [0.98, 0.02],
+                [0.02, 0.98],
+                [-0.98, 0.00],
+            ],
+            dtype=torch.float32,
+        )
+
+        predictions, cluster_labels = spectral_cluster_with_gallery_label_matching(
+            query_embeddings=query_embeddings,
+            gallery_embeddings=gallery_embeddings,
+            gallery_labels=gallery_labels,
+            n_clusters=3,
+            top_k_gallery=2,
+            random_state=42,
+        )
+
+        self.assertEqual(predictions.tolist(), [1, 2, 0])
+        self.assertEqual(cluster_labels.shape[0], 3)
+
+    def test_pca_whiten_embedding_sets_returns_normalized_projected_embeddings(self):
+        gallery_embeddings = torch.tensor(
+            [
+                [2.0, 0.0, 0.0],
+                [1.8, 0.2, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.2, 1.8, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        query_embeddings = torch.tensor(
+            [
+                [1.0, 1.0, 0.0],
+                [1.6, 0.4, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        transformed_gallery, transformed_query = pca_whiten_embedding_sets(
+            gallery_embeddings=gallery_embeddings,
+            query_embeddings=query_embeddings,
+            n_components=2,
+        )
+
+        self.assertEqual(transformed_gallery.shape, (4, 2))
+        self.assertEqual(transformed_query.shape, (2, 2))
+        self.assertTrue(torch.allclose(torch.linalg.norm(transformed_gallery, dim=1), torch.ones(4), atol=1e-5))
+        self.assertTrue(torch.allclose(torch.linalg.norm(transformed_query, dim=1), torch.ones(2), atol=1e-5))
+
+    def test_global_label_spread_can_override_wrong_high_confidence_base_prediction(self):
+        gallery_embeddings = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.98, 0.02],
+                [-1.0, 0.0],
+                [-0.98, -0.02],
+            ]
+        )
+        gallery_labels = torch.tensor([1, 1, 0, 0])
+        query_embeddings = torch.tensor(
+            [
+                [-0.95, 0.02],
+                [-0.93, 0.01],
+                [0.96, 0.03],
+            ]
+        )
+        base_predictions = torch.tensor([1, 1, 1])
+
+        refined_predictions, class_probabilities = global_label_spread_predictions(
+            query_embeddings=query_embeddings,
+            gallery_embeddings=gallery_embeddings,
+            gallery_labels=gallery_labels,
+            class_labels=[0, 1],
+            alpha=0.2,
+            top_k=3,
+            max_iter=50,
+            tol=1e-6,
+        )
+
+        self.assertEqual(base_predictions.tolist(), [1, 1, 1])
+        self.assertEqual(refined_predictions.tolist(), [0, 0, 1])
+        self.assertEqual(class_probabilities.shape, (3, 2))
+        self.assertTrue(torch.allclose(class_probabilities.sum(dim=1), torch.ones(3), atol=1e-5))
+
+    def test_lookalike_margin_rejection_rejects_small_margin_target_acceptance(self):
+        prototypes = {
+            1: torch.tensor([1.0, 0.0]),
+            2: torch.tensor([0.0, 1.0]),
+            3: torch.tensor([0.70, 0.30]),
+            4: torch.tensor([0.30, 0.70]),
+        }
+        query_embeddings = torch.tensor(
+            [
+                [0.85, 0.15],  # close to Jesse and Michael-like -> reject
+                [1.0, 0.0],  # strong Jesse with large margin -> keep
+                [0.0, 1.0],  # Mila side -> keep
+            ]
+        )
+
+        predictions, target_scores, lookalike_scores, margins = predict_open_set_with_lookalike_margin_rejection(
+            query_embeddings=query_embeddings,
+            prototypes=prototypes,
+            target_labels=[1, 2],
+            lookalike_by_target={1: 3, 2: 4},
+            other_label=0,
+            threshold=0.55,
+            margins_by_target={1: 0.03, 2: 0.03},
+        )
+
+        self.assertEqual(predictions.tolist(), [0, 1, 2])
+        self.assertGreater(target_scores[0].item(), 0.55)
+        self.assertLess(margins[0].item(), 0.20)
+        self.assertGreater(margins[1].item(), 0.03)
+
+    def test_conservative_graph_refine_accepts_low_margin_reject_with_strong_anchor_support(self):
+        gallery_embeddings = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.98, 0.02],
+                [0.0, 1.0],
+                [0.0, 0.98],
+                [-1.0, 0.0],
+                [-0.98, 0.02],
+            ]
+        )
+        gallery_labels = torch.tensor([1, 1, 2, 2, 0, 0])
+        query_embeddings = torch.tensor([[0.95, 0.05]])
+        base_predictions = torch.tensor([0])
+        base_scores = torch.tensor([0.53])
+
+        refined = conservative_graph_refine_predictions(
+            query_embeddings=query_embeddings,
+            gallery_embeddings=gallery_embeddings,
+            gallery_labels=gallery_labels,
+            base_predictions=base_predictions,
+            base_scores=base_scores,
+            target_labels=[1, 2],
+            other_label=0,
+            threshold=0.55,
+            low_margin_delta=0.05,
+            top_k=3,
+            accept_consensus=0.8,
+            reject_consensus=0.6,
+            pseudo_accept_margin=0.05,
+            pseudo_reject_margin=0.05,
+            min_anchor_votes=2,
+        )
+
+        self.assertEqual(refined.tolist(), [1])
+
+    def test_conservative_graph_refine_rejects_low_margin_target_without_support(self):
+        gallery_embeddings = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.98, 0.02],
+                [0.0, 1.0],
+                [0.0, 0.98],
+                [-1.0, 0.0],
+                [-0.98, 0.02],
+            ]
+        )
+        gallery_labels = torch.tensor([1, 1, 2, 2, 0, 0])
+        query_embeddings = torch.tensor([[-0.95, 0.05]])
+        base_predictions = torch.tensor([1])
+        base_scores = torch.tensor([0.56])
+
+        refined = conservative_graph_refine_predictions(
+            query_embeddings=query_embeddings,
+            gallery_embeddings=gallery_embeddings,
+            gallery_labels=gallery_labels,
+            base_predictions=base_predictions,
+            base_scores=base_scores,
+            target_labels=[1, 2],
+            other_label=0,
+            threshold=0.55,
+            low_margin_delta=0.05,
+            top_k=3,
+            accept_consensus=0.8,
+            reject_consensus=0.6,
+            pseudo_accept_margin=0.05,
+            pseudo_reject_margin=0.05,
+            min_anchor_votes=2,
+        )
+
+        self.assertEqual(refined.tolist(), [0])
+
+    def test_conservative_graph_refine_leaves_high_margin_prediction_unchanged(self):
+        gallery_embeddings = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.98, 0.02],
+                [0.0, 1.0],
+                [0.0, 0.98],
+                [-1.0, 0.0],
+                [-0.98, 0.02],
+            ]
+        )
+        gallery_labels = torch.tensor([1, 1, 2, 2, 0, 0])
+        query_embeddings = torch.tensor([[-0.95, 0.05]])
+        base_predictions = torch.tensor([1])
+        base_scores = torch.tensor([0.75])
+
+        refined = conservative_graph_refine_predictions(
+            query_embeddings=query_embeddings,
+            gallery_embeddings=gallery_embeddings,
+            gallery_labels=gallery_labels,
+            base_predictions=base_predictions,
+            base_scores=base_scores,
+            target_labels=[1, 2],
+            other_label=0,
+            threshold=0.55,
+            low_margin_delta=0.05,
+            top_k=3,
+            accept_consensus=0.8,
+            reject_consensus=0.6,
+            pseudo_accept_margin=0.05,
+            pseudo_reject_margin=0.05,
+            min_anchor_votes=2,
+        )
+
+        self.assertEqual(refined.tolist(), [1])
+
     def test_compute_similarity_matrix_returns_scores_in_requested_label_order(self):
         prototypes = {
             2: torch.tensor([0.0, 1.0]),

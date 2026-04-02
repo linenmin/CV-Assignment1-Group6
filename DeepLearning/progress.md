@@ -749,3 +749,253 @@
   - 冻结 `feature/norm` 后，`exp_037` 比 `exp_036` 更接近 `exp_032`，这直接支持了“`exp_036` 的主导更新来自 feature 层”这个判断；
   - `blocks-only` 是比 `exp_036` 更真实的受控 `ViT partial fine-tune`；
   - 但当前它仍比 `exp_032` 多 `1` 张 `0 -> 2`，离线还不足以直接宣布它优于 strongest baseline。
+
+### Session 35
+
+- 已按用户要求启动 `exp_038 = KP-RPE integration audit + frozen ViT KP-RPE WebFace12M pilot`。
+- 当前完成的审计结论如下：
+  - `minchul/cvlface_adaface_vit_base_kprpe_webface12m` 的官方接口不是普通 `model(input)`，而是 `model(input, keypoints)`；
+  - 官方模型卡同时要求额外加载 aligner：`minchul/cvlface_DFA_mobilenet`；
+  - 当前本地 `cvlface.py` loader 只支持 `CVLFaceRecognitionModel`，不能直接加载 aligner repo 中的 `CVLFaceAlignmentModel`；
+  - `KP-RPE` 仓库依赖 `rpe_ops` 扩展，且没有可用的纯 Python fallback。
+- 为排除简单环境问题，本轮已经做了以下尝试：
+  - 在 `gpu_env` 中安装 `easydict`
+  - 下载并审阅 `KP-RPE` 模型仓库与 `DFA` aligner 仓库
+  - 尝试编译 `models/vit_kprpe/RPE/rpe_ops`
+- 结论是：当前 pilot 被环境层硬阻塞，尚不能真正开始训练/推理。
+  - `rpe_ops` 编译失败
+  - 当前机器不存在 `cl` / `g++` / `ninja`
+  - 唯一可见编译器相关工具是 `nvcc 11.0`
+  - 编译报错明确指出：`detected CUDA 11.0 mismatches PyTorch 12.1`
+- 因此，这轮 `exp_038` 的产出是**接入审计结论**而不是 runnable pilot：
+  - `KP-RPE` 值得继续做
+  - 但要先解决编译链和 aligner/keypoint 输入链路，当前环境下不能假装它已经是“只改 repo_id 就能跑”的实验
+
+### Session 36
+
+- 已完成真正的 `IR101 WebFace12M` drop-in 替换实验：
+  - `exp_039_ir101_adaface_haar_10ep_laststage_ft_webface12m_prototype_fixed055`
+- 本轮刻意保持其余协议不变：
+  - 继续使用 `HAAR` 裁脸
+  - 继续使用 `last-stage fine-tune`
+  - 推理继续固定为 `prototype + threshold=0.55`
+  - 唯一方法层变化是把 `pretrained_repo_id` 从 `minchul/cvlface_adaface_ir101_webface4m` 换成 `minchul/cvlface_adaface_ir101_webface12m`
+- 当前本地结果：
+  - `best_val_acc = 1.0`
+  - `prototype val_accuracy = 0.9375`
+  - `selected_threshold = 0.55`
+  - submission：`data/submissions/20260402_143133_exp_039_ir101_adaface_haar_10ep_laststage_ft_webface12m_prototype_fixed055_submission.csv`
+- 相比 `exp_019`：
+  - 共 `264` 张预测变化
+  - `263` 张 `0 -> 1`
+  - `1` 张 `0 -> 2`
+- 相比 `exp_032`：
+  - 共 `257` 张预测变化
+  - `254` 张 `0 -> 1`
+  - `2` 张 `0 -> 2`
+  - `1` 张 `2 -> 0`
+- `exp_039` 的预测分布为：
+  - `0:827, 1:606, 2:383`
+- 结论：
+  - `WebFace12M` 在当前 `IR101 + exp_019` 协议下没有表现为“更强但更稳”的 drop-in 增强；
+  - 它和 `exp_030 / exp_031` 一样，主要效果是系统性放宽接受边界；
+  - 因此仅仅换成更大预训练数据，并不能保证在当前 open-set 规则下得到更好的拒识行为。
+  - 线上 Kaggle public score 已确认是 `0.80341`，明显低于 `exp_019 = 0.91685` 与 `exp_032 = 0.92180`，说明这类大规模 `0 -> 1` 放宽在线上确实是负向变化。
+
+### Session 37
+
+- 已完成 `frozen ViT + MTCNN + prototype + fixed 0.55` 的受控输入侧实验：
+  - `exp_040_vit_adaface_mtcnn_1ep_frozen_prototype_fixed055`
+- 本轮刻意保持与 `exp_032` 尽量一致：
+  - backbone 仍是 `minchul/cvlface_adaface_vit_base_webface4m`
+  - 仍是 frozen `ViT`
+  - 仍然固定 `prototype + threshold=0.55`
+  - 唯一主变量是输入从 `HAAR` 裁脸切到 `MTCNN + 5 点对齐`
+- 当前本地结果：
+  - `best_val_acc = 0.75`
+  - `prototype val_accuracy = 0.9375`
+  - `selected_threshold = 0.55`
+  - submission：`data/submissions/20260402_144532_exp_040_vit_adaface_mtcnn_1ep_frozen_prototype_fixed055_submission.csv`
+- 相比 `exp_032`：
+  - 只有 `1` 张预测变化
+  - 方向是 `1 -> 0`
+- 相比 `exp_019`：
+  - 共 `12` 张预测变化
+  - `9` 张 `0 -> 1`
+  - `1` 张 `0 -> 2`
+  - `1` 张 `1 -> 0`
+  - `1` 张 `2 -> 0`
+- 相比早期 `exp_008`：
+  - 完全不是同一种失败模式
+  - `exp_008` 相比 `exp_040` 有 `708` 张差异，主要是把大量目标类压回 `0`
+- 结论：
+  - 早期的 `MTCNN` 负例不能外推到当前 `frozen ViT` 主线；
+  - 在当前 `ViT` backbone 上，`MTCNN` 没有带来大突破，但也没有破坏 `exp_032` 的主体行为；
+  - `exp_040` 目前应视为一个**极近邻候选**，是否优于 `exp_032` 需要 Kaggle 才能判断。
+
+### Session 38
+
+- 已完成 `frozen ViT + horizontal flip TTA + prototype + fixed 0.55`：
+  - `exp_041_vit_adaface_haar_1ep_frozen_prototype_fixed055_hfliptta`
+- 本轮是纯推理增强，不重新训练：
+  - 直接复用 `exp_032` 的 frozen `ViT` checkpoint
+  - 在 embedding 提取阶段增加 `original + hflip` 两次前向并做平均
+  - 推理协议仍固定为 `prototype + threshold=0.55`
+- 为此新增了通用 TTA helper：
+  - `src/dl_pipeline/inference/tta.py`
+  - `predict.py` 现已支持 `tta_horizontal_flip: true`
+- 当前本地结果：
+  - `val_accuracy = 0.9375`
+  - `selected_threshold = 0.55`
+  - submission：`data/submissions/20260402_153303_exp_041_vit_adaface_haar_1ep_frozen_prototype_fixed055_hfliptta_submission.csv`
+- 相比 `exp_032`：
+  - 只有 `1` 张预测变化
+  - 方向是 `0 -> 2`
+- 预测分布为：
+  - `0:1081, 1:352, 2:383`
+- 结论：
+  - `horizontal flip TTA` 在当前 strongest baseline 上表现为**低风险、极小幅**的正交扰动；
+  - 它没有重演 `IR101 WebFace12M` 那种系统性边界放松；
+  - 但离线信息量仍然很小，单独看还不足以称为“突破”。
+
+### Session 39
+
+- 已完成第一版保守式图修正实验：
+  - `exp_042_vit_adaface_haar_1ep_frozen_graphrefine_fixed055_hfliptta`
+- 设计目标不是激进传播，而是验证“保守 gated graph refinement 是否能在不污染 look-alike 邻域的前提下修正少量边界样本”：
+  - base embedding 直接使用 `exp_041` 的 `frozen ViT + hflip TTA`
+  - labeled gallery 始终作为硬锚点
+  - 只对低边际样本开放修正
+  - `0 -> 1/2` 的接受门槛高于 `1/2 -> 0`
+- 本轮实现内容：
+  - `src/dl_pipeline/inference/prototype.py` 新增 `conservative_graph_refine_predictions`
+  - `predict.py` 新增 `mode: conservative_graph_refine`
+  - 增加对应单元测试覆盖低边际接收、拒绝和高置信不变三种情形
+- 当前本地结果：
+  - `base_val_accuracy = 0.9375`
+  - `refined_val_accuracy = 0.9375`
+  - `num_changed_test_predictions = 0`
+  - submission：`data/submissions/20260402_154035_exp_042_vit_adaface_haar_1ep_frozen_graphrefine_fixed055_hfliptta_submission.csv`
+- 相比 `exp_041`：
+  - 测试集预测完全一致
+- 结论：
+  - 当前这版 conservative graph refinement 是**安全但未触发**的；
+  - 好消息是没有出现 look-alike 污染或大规模误接收；
+  - 坏消息是当前 gating 过于保守，尚不足以带来任何线上有意义的变化。
+
+### Session 40
+
+- 已完成第一版全局图传播 pilot：
+  - `exp_043_vit_adaface_haar_1ep_frozen_globallabelspread_hfliptta`
+- 设计目标是验证“高置信错例是否真的需要全局图结构才能被纠正”，因此这轮不再只看 boundary case：
+  - base embedding 仍是 `frozen ViT + hflip TTA`
+  - labeled nodes 使用 `80` 张 gallery
+  - 图使用全局 cosine kNN 传播，而不是局部边界 gating
+- 当前本地结果：
+  - `val_accuracy = 1.0`
+  - `alpha = 0.2`
+  - `top_k = 20`
+  - submission：`data/submissions/20260402_160537_exp_043_vit_adaface_haar_1ep_frozen_globallabelspread_hfliptta_submission.csv`
+- 相比 `exp_032`：
+  - 共 `153` 张预测变化
+  - `115` 张 `0 -> 2`
+  - `38` 张 `0 -> 1`
+- 预测分布为：
+  - `0:929, 1:390, 2:497`
+- 结论：
+  - 这轮明确回答了“当前瓶颈是不是只有 boundary case 太少”这个问题：不是；
+  - 全局图结构确实能推动大量高置信样本发生变化，说明 `exp_042` 的 inert 不是因为图方法整体无效；
+  - 但当前第一版 `LabelSpreading-style` 传播的变化方向又重新退化成**纯接受型扩张**，风险画像与此前的大规模 `0 -> 1/2` 负例更接近，而不是与 `exp_032` 的“小而准修正”接近。
+
+### Session 41
+
+- 已完成 look-alike margin rejection 对照实验：
+  - `exp_044_vit_adaface_haar_1ep_frozen_lookalikemargin_hfliptta`
+- 本轮复用了 `exp_029` 的 `other -> {michael_like, sarah_like}` 聚类构造，但不再使用“最近 prototype 是 look-alike 就拒绝”的硬规则，而是改成：
+  - 先过目标类阈值 `0.55`
+  - 再检查 `target score - matched look-alike score`
+  - 若 margin 小于候选值，则拒到 `other`
+- 当前本地结果：
+  - `selected_margin = 0.01`
+  - `val_accuracy = 0.9375`
+  - submission：`data/submissions/20260402_160538_exp_044_vit_adaface_haar_1ep_frozen_lookalikemargin_hfliptta_submission.csv`
+- 相比 `exp_032`：
+  - 只有 `1` 张预测变化
+  - 方向仍是 `0 -> 2`
+- 结论：
+  - 当前这版 look-alike margin rejection 在自动选出的 margin 下几乎没有触发；
+  - 它没有提供比 `exp_041` 更多的信息量；
+  - 至少在 frozen `ViT` + 当前 clustered look-alike prototype 设定下，简单 margin rejection 还不足以成为突破方向。
+
+### Session 42
+
+- 已完成 `Spectral clustering k=4 + gallery label matching`：
+  - `exp_045_vit_adaface_haar_1ep_frozen_spectralcluster_hfliptta`
+- 本轮是对“能否完全绕开 0.55 阈值，直接用全局聚类结构重建三类决策”的第一版验证：
+  - base embedding 仍是 `frozen ViT + hflip TTA`
+  - 用 `4` 个 spectral clusters 划分 test
+  - 再用 labeled gallery 近邻给 cluster 匹配类别
+- 当前本地结果：
+  - `val_accuracy = 0.9375`
+  - submission：`data/submissions/20260402_162721_exp_045_vit_adaface_haar_1ep_frozen_spectralcluster_hfliptta_submission.csv`
+- 相比 `exp_032`：
+  - 共 `494` 张预测变化
+  - `382` 张 `2 -> 0`
+  - `75` 张 `0 -> 2`
+  - `37` 张 `0 -> 1`
+- 预测分布为：
+  - `0:1352, 1:389, 2:75`
+- 结论：
+  - 这轮第一次在后处理里出现了明显的**大规模保守修正**；
+  - 但强度过大，已经不再是“微调局部错误”，而是几乎重写了 `Mila` 的整体决策边界；
+  - 因而它是一个很有信息量的结构性实验，但当前版本不可直接提交。
+
+### Session 43
+
+- 已完成 `PCA whitening + prototype + 0.55`：
+  - `exp_046_vit_adaface_haar_1ep_frozen_pcawhitenedproto_hfliptta`
+- 本轮验证的是“是否能通过改变 embedding 几何而不是改变模型/规则，提升 prototype 分离度”。
+- 当前本地结果：
+  - `val_accuracy = 0.3125`
+  - `n_components = 32`
+  - submission：`data/submissions/20260402_162720_exp_046_vit_adaface_haar_1ep_frozen_pcawhitenedproto_hfliptta_submission.csv`
+- 相比 `exp_032`：
+  - 共 `671` 张预测变化
+  - `289` 张 `1 -> 0`
+  - `382` 张 `2 -> 0`
+- 预测分布为：
+  - `0:1753, 1:63`
+- 结论：
+  - 这轮不是“微弱无效”，而是**明显破坏了原始 embedding 几何**；
+  - 在当前数据规模和设定下，PCA whitening 会把原本可接受的目标类大面积压回 `other`；
+  - 因而这条线当前可以视为明确负例。
+
+### Session 44
+
+- 已完成 `Neighborhood-aware scoring`：
+  - `exp_047_vit_adaface_haar_1ep_frozen_neighborhoodaware_fixed055_hfliptta`
+- 本轮严格按诊断脚本中的定义实现：
+  - `base_score = best prototype similarity`
+  - `neighbor_mean_score = test-test top-15 邻域的 base score 均值`
+  - `final_score = 0.5 * base_score + 0.5 * neighbor_mean_score`
+  - `threshold = 0.55`
+  - 最终类别仍保持 prototype argmax，只让邻域分数参与 accept/reject
+- 当前本地结果：
+  - `val_accuracy = 0.9375`
+  - submission：`data/submissions/20260402_164731_exp_047_vit_adaface_haar_1ep_frozen_neighborhoodaware_fixed055_hfliptta_submission.csv`
+- 相比 `exp_032`：
+  - 共 `8` 张预测变化
+  - `3` 张 `0 -> 1`
+  - `5` 张 `0 -> 2`
+- 相比 `exp_041`：
+  - 共 `7` 张变化
+  - `3` 张 `0 -> 1`
+  - `4` 张 `0 -> 2`
+- 预测分布为：
+  - `0:1074, 1:355, 2:387`
+- 结论：
+  - 这轮和 `exp_043 / exp_045` 的大范围结构改动不同，属于**小而准的健康修正**；
+  - 它没有引入任何 `1/2 -> 0` 的大规模收缩，也没有出现几十上百张级别的边界放宽；
+  - 因而它是当前最接近“值得提交验证”的推理改进候选之一。
+- 线上 Kaggle public score 已确认是 `0.92621`，超过 `exp_032 = 0.92180`；
+- 因此 `exp_047` 已更新为新的 strongest online baseline。

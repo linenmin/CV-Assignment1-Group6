@@ -41,7 +41,7 @@
 - 工程开发采用 `script-first`，最终 notebook 暂不纳入当前起步阶段。
 - Kaggle 迭代阶段优先采用 `csv` 提交，等方案收敛后再回填 notebook。
 - 协作方式采用共享 pipeline、轮流迭代，不按子模块永久分工。
-- 当前最强线上结果是 `exp_032 = 0.92180`，对应协议为：`frozen ViT AdaFace + prototype + fixed threshold 0.55`。
+- 当前最强线上结果是 `exp_047 = 0.92621`，对应协议为：`frozen ViT AdaFace + hflip TTA + neighborhood-aware scoring + fixed threshold 0.55`。
 - `threshold = 0.55` 视为当前锁定的评测协议；在模型探索阶段不再继续自由搜索阈值。
 - `exp_023 ~ exp_027` 已验证多种更复杂的开放集推理思路，但当前实现大多会把过多 `other` 放宽为目标类，因此暂不消耗 Kaggle 配额继续提交。
 - 当前阶段的实验优先级应从“小幅边界调参”转为“只有明显不同的方法层变化才值得提交”，例如 score/model fusion 或训练目标对齐。
@@ -75,10 +75,79 @@
   - 在 `blocks-only` 设定下扫描 `last-1 / last-2 / last-3`
   - 或做和训练正交的 `TTA`
   而不是重新放开 `feature` 或继续做线性融合。
+- `exp_038` 的 `KP-RPE integration audit` 已完成第一轮结论：`minchul/cvlface_adaface_vit_base_kprpe_webface12m` 不是当前代码里的真 drop-in。它至少需要：
+  - keypoint-aware 前向接口（`model(input, keypoints)`）
+  - 单独的 aligner 模型接线
+  - `rpe_ops` 本地 C++/CUDA 扩展成功编译
+- 当前机器上的 `exp_038` 运行被环境层阻塞：
+  - `cl` / `g++` / `ninja` 均不存在
+  - 仅有 `nvcc 11.0`
+  - `rpe_ops` 编译失败，报 `CUDA 11.0` 与 `PyTorch 12.1` 不匹配
+  因此这轮不能如期完成 frozen `KP-RPE WebFace12M` pilot。
 - 后续只有在满足以下至少一项时，才值得占用 Kaggle 提交：
   - 本地规则没有退化成更松的接收边界；
   - 与 `exp_019` 相比不是简单地大规模 `0 -> 1/2`；
   - 方法层有明确新信息，而不是旧 scorer 的轻微变体。
+- `exp_039` 已完成 `IR101 WebFace12M` 的真实 drop-in 验证，但结果给出明确负信号：
+  - 相比 `exp_019` 有 `264` 张变化，其中 `263` 张是 `0 -> 1`
+  - 相比 `exp_032` 有 `257` 张变化，也几乎全部是更松的接收
+  - 因而“更大预训练数据源”这条轴在当前 `IR101 + prototype + fixed 0.55` 组合下，并没有自动转化成更好的 open-set 行为
+  - 线上 Kaggle public score 已确认是 `0.80341`，因此这条线当前不再值得继续消耗配额深挖
+- 这意味着当前优先级应进一步从“继续试 `IR101 WebFace12M` 变体”转向更正交的输入质量轴，例如：
+  - 在当前 strongest baseline `exp_032` 上重新验证 `MTCNN` 对齐
+  - 或其他不会天然引入大规模边界放松的输入侧改动
+- `exp_040` 已完成上述第一条验证，结果是：
+  - 相比 `exp_032` 仅 `1` 张 `1 -> 0`
+  - 相比 `exp_019` 保持了与 `exp_032` 基本相同的整体画像
+  - 没有重演早期 `exp_008` 的大规模负迁移
+- 因此当前阶段结论更新为：
+  - `MTCNN` 在 `frozen ViT` 主线上不是被否掉的方向
+  - 但它目前也还没有提供“离线足够明显的新突破”
+  - 更合理的定位是：`exp_040` 可作为近邻提交候选，与 `exp_032` 做一次线上对照
+- `exp_041` 已完成 `frozen ViT + horizontal flip TTA` 的最低风险推理增强验证，结果是：
+  - 相比 `exp_032` 仅 `1` 张 `0 -> 2`
+  - 没有引入大规模边界放宽或塌缩
+  - 因而它更适合作为后续结构性方法的 base embedding 增强层，而不是单独的冲榜主方法
+- `exp_042` 已完成第一版 conservative graph refinement，结果是：
+  - `base_val_accuracy` 与 `refined_val_accuracy` 同为 `0.9375`
+  - `num_changed_test_predictions = 0`
+  - 说明当前 gating 已经足够保守，不会污染 look-alike 邻域
+  - 但也说明它暂时还没有进入“会产生有效修正”的区间
+- 因此当前阶段优先级进一步更新为：
+  - `exp_032` 仍是 strongest baseline
+- `exp_041` 可视为当前最健康的增强版 embedding 基座
+- 若继续走图方法，应优先调整 conservative graph refinement 的 gating 区间，而不是回到激进传播
+- `KP-RPE` 仍然后置，直到环境链路打通
+- `exp_043` 已给出新的关键信息：
+  - 全局图传播确实可以动到大量高置信样本，说明“错误都卡在 boundary”这个假设不成立
+  - 但第一版 `LabelSpreading-style` 传播的 `153` 张变化全部是 `0 -> 1/2`
+  - 因而当前最需要解决的问题不是“图方法能不能动”，而是“如何让全局图修正产生保守方向，而不是系统性扩张”
+- `exp_044` 也已经验证：
+  - 简单的 look-alike margin rejection 在当前 frozen `ViT` embedding 上几乎不触发
+  - 因而它暂时不构成主线突破方向
+- 因此当前阶段优先级继续更新为：
+  - `exp_032` 仍是 strongest baseline
+- `exp_043` 是当前最有信息量的新负例：证明全局图传播有杠杆，但默认形式风险极高
+- 后续若继续沿图结构推进，应优先研究**如何限制全局传播的扩张方向**，而不是继续放松局部 gating
+- `exp_045` 则提供了另一条新的结构性信号：
+  - `Spectral clustering + gallery label matching` 不再是纯扩张，而是出现了大规模 `2 -> 0` 的保守修正
+  - 这说明“全局结构方法”并非只能把 `other` 吸进目标类，也可以反过来大幅收紧某个目标类边界
+  - 但当前版本过于激进，已经超出可提交范围
+- `exp_046` 已明确否掉 `PCA whitening + prototype`：
+  - 在当前 frozen `ViT` 主线上，它会把大量目标类压回 `other`
+  - 因而这条线当前不再继续投入
+- 因此当前阶段进一步收敛为：
+  - `exp_032` 仍是 strongest baseline
+- `exp_045` 是最新的高信息量结构实验，但需要“去极端化”后才值得继续
+- 后续若继续突破 0.92，最值得保留的方向是**更可控的全局结构方法**，而不是 whitening、look-alike margin 或继续微调 ViT
+- `exp_047` 已经提供了一个比全局传播更干净的新信号：
+  - `neighborhood-aware scoring = 0.5 * base_score + 0.5 * neighbor_mean_score`
+  - 相比 `exp_032` 仅 `8` 张变化，且全部是 `0 -> 1/2`
+  - 变化量级与 `exp_032` 当初的线上成功模式相匹配
+- 因此当前阶段结论更新为：
+- `exp_047` 已成为 strongest online baseline
+- `exp_032` 退为最重要的纯 prototype 对照基线
+- 若继续围绕 `neighbor_mean_score` 细化，必须以“只做小而准修正、不破坏 `exp_047` 当前收益”为前提
 
 ## 错误记录
 

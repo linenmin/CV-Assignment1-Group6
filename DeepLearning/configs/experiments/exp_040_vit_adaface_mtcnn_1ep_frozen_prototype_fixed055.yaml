@@ -1,0 +1,35 @@
+experiment_name: exp_040_vit_adaface_mtcnn_1ep_frozen_prototype_fixed055
+
+data:
+  detector: mtcnn
+  processed_dir: data/processed/exp_008_mtcnn_faces_112
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 0
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 1
+  learning_rate: 0.0003
+  backbone_learning_rate:
+  weight_decay: 0.0001
+  early_stopping_patience: 1
+
+augmentation:
+  use_horizontal_flip: false
+
+inference:
+  mode: prototype
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold_values: [0.55]
