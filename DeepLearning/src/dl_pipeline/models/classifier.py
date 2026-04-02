@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from dl_pipeline.models.cvlface import load_cvlface_backbone
+from dl_pipeline.models.lvface import load_lvface_backbone, resolve_pretrained_checkpoint
 
 
 def _set_requires_grad(module: nn.Module, requires_grad: bool) -> None:
@@ -81,6 +82,34 @@ def _unfreeze_last_cvlface_stages(
         return
 
     raise ValueError("当前 cvlface backbone 结构不支持按 stage/block 解冻。")
+
+
+def _unfreeze_last_lvface_vit_blocks(
+    backbone: nn.Module,
+    block_count: int,
+    *,
+    unfreeze_norm: bool = True,
+    unfreeze_feature: bool = True,
+) -> None:
+    """LVFace VisionTransformer：按最后若干 Block 解冻，可选解冻 ``norm`` / ``feature``。"""
+    if block_count <= 0:
+        return
+    if not hasattr(backbone, "blocks"):
+        raise ValueError(
+            "当前 lvface backbone 不是 VisionTransformer（缺少 blocks）。"
+            "若使用 ResNet 系 LVFace，请暂时将 unfreeze_stage_count 设为 0，或扩展解冻逻辑。"
+        )
+    blocks = backbone.blocks
+    if block_count > len(blocks):
+        raise ValueError(
+            f"请求解冻 {block_count} 个 block，但当前 backbone 只有 {len(blocks)} 个 block。"
+        )
+    for block in blocks[-block_count:]:
+        _set_requires_grad(block, True)
+    if unfreeze_norm and hasattr(backbone, "norm"):
+        _set_requires_grad(backbone.norm, True)
+    if unfreeze_feature and hasattr(backbone, "feature"):
+        _set_requires_grad(backbone.feature, True)
 
 
 class ArcFaceHead(nn.Module):
@@ -160,6 +189,48 @@ class CVLFaceClassifier(nn.Module):
         return self.classifier(self.extract_features(x))
 
 
+class LVFaceClassifier(nn.Module):
+    """LVFace 预训练 backbone + 线性分类头；接口与 ``CVLFaceClassifier`` 一致。"""
+
+    def __init__(
+        self,
+        backbone: nn.Module,
+        feature_dim: int,
+        num_classes: int,
+        dropout: float,
+        freeze_backbone: bool,
+        unfreeze_last_stage: bool = False,
+        unfreeze_stage_count: int = 0,
+        unfreeze_cvlface_norm: bool = True,
+        unfreeze_cvlface_feature: bool = True,
+    ) -> None:
+        super().__init__()
+        self.backbone = backbone
+        effective_unfreeze_stage_count = max(unfreeze_stage_count, 1 if unfreeze_last_stage else 0)
+        if freeze_backbone or effective_unfreeze_stage_count > 0:
+            _set_requires_grad(self.backbone, False)
+        if effective_unfreeze_stage_count > 0:
+            _unfreeze_last_lvface_vit_blocks(
+                self.backbone,
+                effective_unfreeze_stage_count,
+                unfreeze_norm=unfreeze_cvlface_norm,
+                unfreeze_feature=unfreeze_cvlface_feature,
+            )
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(feature_dim, num_classes),
+        )
+
+    def extract_features(self, x):
+        features = self.backbone(x)
+        if isinstance(features, tuple):
+            features = features[0]
+        return features
+
+    def forward(self, x):
+        return self.classifier(self.extract_features(x))
+
+
 def build_classifier(
     model_family: str,
     backbone_name: str,
@@ -172,12 +243,30 @@ def build_classifier(
     unfreeze_stage_count: int = 0,
     unfreeze_cvlface_norm: bool = True,
     unfreeze_cvlface_feature: bool = True,
+    pretrained_checkpoint_path: str | None = None,
 ) -> nn.Module:
     if model_family == "cvlface":
         if not pretrained_repo_id:
             raise ValueError("cvlface 模型需要提供 pretrained_repo_id。")
         backbone = load_cvlface_backbone(pretrained_repo_id)
         return CVLFaceClassifier(
+            backbone=backbone,
+            feature_dim=512,
+            num_classes=num_classes,
+            dropout=dropout,
+            freeze_backbone=freeze_backbone,
+            unfreeze_last_stage=unfreeze_last_stage,
+            unfreeze_stage_count=unfreeze_stage_count,
+            unfreeze_cvlface_norm=unfreeze_cvlface_norm,
+            unfreeze_cvlface_feature=unfreeze_cvlface_feature,
+        )
+
+    if model_family == "lvface":
+        if not pretrained_checkpoint_path:
+            raise ValueError("lvface 模型需要提供 pretrained_checkpoint_path（本地 LVFace .pt 权重）。")
+        checkpoint_path = resolve_pretrained_checkpoint(pretrained_checkpoint_path)
+        backbone = load_lvface_backbone(backbone_name, checkpoint_path)
+        return LVFaceClassifier(
             backbone=backbone,
             feature_dim=512,
             num_classes=num_classes,

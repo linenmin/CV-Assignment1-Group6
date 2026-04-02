@@ -19,6 +19,7 @@ model:
   pretrained: true
   dropout: 0.2
   pretrained_repo_id:
+  pretrained_checkpoint_path:
   freeze_backbone: false
   unfreeze_last_stage: false
   unfreeze_stage_count: 0

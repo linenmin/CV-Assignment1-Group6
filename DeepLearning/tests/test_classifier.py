@@ -29,6 +29,19 @@ class DummyCVLFaceBackbone(nn.Module):
         return torch.randn(x.shape[0], 512)
 
 
+class DummyLVFaceViTBackbone(nn.Module):
+    """模拟 third_party/LVFace VisionTransformer（顶层含 blocks / norm / feature）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([nn.Linear(4, 4) for _ in range(24)])
+        self.norm = nn.LayerNorm(4)
+        self.feature = nn.Sequential(nn.Linear(4, 512))
+
+    def forward(self, x):
+        return torch.randn(x.shape[0], 512)
+
+
 class DummyCVLFaceViTBackbone(nn.Module):
     def __init__(self):
         super().__init__()
@@ -183,6 +196,38 @@ class ClassifierFactoryTests(unittest.TestCase):
             self.assertTrue(all(p.requires_grad for p in block.parameters()))
         self.assertTrue(all(not p.requires_grad for p in model.backbone.model.net.norm.parameters()))
         self.assertTrue(all(not p.requires_grad for p in model.backbone.model.net.feature.parameters()))
+
+    @patch("dl_pipeline.models.classifier.load_lvface_backbone")
+    def test_build_classifier_wraps_lvface_backbone(self, mock_lvface):
+        mock_lvface.return_value = DummyLVFaceViTBackbone()
+
+        model = build_classifier(
+            model_family="lvface",
+            backbone_name="vit_b_dp005_mask_005",
+            num_classes=3,
+            pretrained=False,
+            dropout=0.2,
+            pretrained_checkpoint_path="models/pretrained/LVFace-B_Glint360K.pt",
+            freeze_backbone=True,
+        )
+
+        self.assertEqual(model.classifier[-1].out_features, 3)
+        mock_lvface.assert_called_once()
+        logits = model(torch.randn(2, 3, 112, 112))
+        self.assertEqual(tuple(logits.shape), (2, 3))
+        features = model.extract_features(torch.randn(2, 3, 112, 112))
+        self.assertEqual(tuple(features.shape), (2, 512))
+
+    def test_build_classifier_lvface_requires_pretrained_checkpoint_path(self):
+        with self.assertRaises(ValueError):
+            build_classifier(
+                model_family="lvface",
+                backbone_name="vit_b_dp005_mask_005",
+                num_classes=3,
+                pretrained=False,
+                dropout=0.2,
+                freeze_backbone=True,
+            )
 
     @patch("dl_pipeline.models.classifier.load_cvlface_backbone")
     def test_build_classifier_rejects_too_many_vit_blocks_to_unfreeze(self, mock_loader):

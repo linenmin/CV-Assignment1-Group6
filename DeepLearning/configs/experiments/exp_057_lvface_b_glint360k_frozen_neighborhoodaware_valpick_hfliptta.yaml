@@ -1,0 +1,54 @@
+# 复用 exp_056 权重；在验证集上搜索 neighborhood_aware 最优阈值（解决 LVFace 余弦尺度与 0.55 不匹配问题）。
+# 推理前需已有 exp_056 的 metrics.json，或通过 inference.checkpoint_source_experiment 指向其 outputs 目录名。
+
+experiment_name: exp_057_lvface_b_glint360k_frozen_neighborhoodaware_valpick_hfliptta
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+
+model:
+  family: lvface
+  backbone_name: vit_b_dp005_mask_005
+  pretrained: false
+  pretrained_checkpoint_path: models/pretrained/LVFace-B_Glint360K.pt
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 0
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 1
+  learning_rate: 0.0003
+  backbone_learning_rate:
+  weight_decay: 0.0001
+  early_stopping_patience: 1
+
+augmentation:
+  use_horizontal_flip: false
+
+inference:
+  checkpoint_source_experiment: exp_056_lvface_b_glint360k_frozen_neighborhoodaware_fixed055_hfliptta
+  mode: neighborhood_aware
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold: 0.35
+  threshold_values:
+    - 0.10
+    - 0.15
+    - 0.20
+    - 0.25
+    - 0.30
+    - 0.35
+    - 0.40
+    - 0.45
+    - 0.50
+    - 0.55
+  tta_horizontal_flip: true
+  neighborhood_aware:
+    top_k: 15
+    base_weight: 0.5

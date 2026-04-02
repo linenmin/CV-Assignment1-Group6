@@ -20,8 +20,12 @@ from dl_pipeline.data.datamodule import FaceDataModule
 from dl_pipeline.inference.prototype import (
     average_normalized_embedding_sets,
     combine_embedding_sets,
+    compute_subcenter_prototypes,
     conservative_graph_refine_predictions,
     compute_class_prototypes,
+    cross_model_disagreement_resolve,
+    neighborhood_aware_subcenter_predictions,
+    transductive_cluster_refinement,
     predict_open_set_with_lookalikes,
     predict_open_set_with_lookalike_margin_rejection,
     predict_open_set_with_quality_aware_scorer,
@@ -32,6 +36,7 @@ from dl_pipeline.inference.prototype import (
     predict_open_set_with_class_thresholds,
     global_label_spread_predictions,
     neighborhood_aware_predictions,
+    neighborhood_score_fusion_predictions,
     pca_whiten_embedding_sets,
     select_best_quality_aware_params_leave_one_out,
     select_best_richer_scorer_params_leave_one_out,
@@ -40,6 +45,7 @@ from dl_pipeline.inference.prototype import (
     select_best_class_thresholds,
     select_best_threshold_crossval,
     select_best_threshold,
+    select_best_neighborhood_threshold,
     spectral_cluster_with_gallery_label_matching,
 )
 from dl_pipeline.inference.submission import build_submission_dataframe, save_submission_dataframe
@@ -81,6 +87,7 @@ def _load_model_from_checkpoint(config, checkpoint_path: str):
         scheduler_name=config["train"]["scheduler"],
         max_epochs=config["train"]["max_epochs"],
         pretrained_repo_id=config["model"].get("pretrained_repo_id"),
+        pretrained_checkpoint_path=config["model"].get("pretrained_checkpoint_path"),
         freeze_backbone=config["model"].get("freeze_backbone", False),
         unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
         unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
@@ -1369,11 +1376,13 @@ def _run_neighborhood_aware_inference(config, datamodule, model, test_df, output
     inference_config = config.get("inference", {})
     prototype_labels = inference_config.get("prototype_labels", [1, 2])
     other_label = inference_config.get("other_label", 0)
-    threshold = inference_config.get("threshold", 0.55)
+    threshold_values = inference_config.get("threshold_values")
+    threshold = float(inference_config.get("threshold", 0.55))
     use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
     neighborhood_config = inference_config.get("neighborhood_aware", {})
     top_k = neighborhood_config.get("top_k", 15)
     base_weight = neighborhood_config.get("base_weight", 0.5)
+    threshold_search_details: list[dict[str, float]] | None = None
 
     device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
     model = model.to(device)
@@ -1402,15 +1411,27 @@ def _run_neighborhood_aware_inference(config, datamodule, model, test_df, output
         train_labels,
         prototype_labels=prototype_labels,
     )
+    if threshold_values:
+        threshold, val_accuracy, threshold_search_details = select_best_neighborhood_threshold(
+            val_embeddings=val_embeddings,
+            val_labels=val_labels,
+            prototypes=prototypes,
+            other_label=other_label,
+            threshold_values=list(threshold_values),
+            top_k=int(top_k),
+            base_weight=float(base_weight),
+        )
+
     val_predictions, val_base_scores, val_neighbor_scores, val_final_scores = neighborhood_aware_predictions(
         query_embeddings=val_embeddings,
         prototypes=prototypes,
         other_label=other_label,
-        threshold=threshold,
+        threshold=float(threshold),
         top_k=top_k,
         base_weight=base_weight,
     )
-    val_accuracy = (val_predictions == val_labels).float().mean().item()
+    if not threshold_values:
+        val_accuracy = (val_predictions == val_labels).float().mean().item()
 
     all_gallery_embeddings, all_gallery_labels = combine_embedding_sets(
         [
@@ -1439,6 +1460,7 @@ def _run_neighborhood_aware_inference(config, datamodule, model, test_df, output
         "tta_horizontal_flip": use_horizontal_flip_tta,
         "selected_threshold": float(threshold),
         "val_accuracy": float(val_accuracy),
+        "threshold_search": threshold_search_details,
         "neighborhood_aware": {
             "top_k": int(top_k),
             "base_weight": float(base_weight),
@@ -1463,6 +1485,679 @@ def _run_neighborhood_aware_inference(config, datamodule, model, test_df, output
     return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
 
 
+def _run_transductive_neighborhood_aware_inference(
+    config, datamodule, model, test_df, output_root: Path
+) -> list[int]:
+    """优先级 1：在 exp_047 同款 neighborhood_aware 之后，仅对 test 做传导式簇精炼（单模型）。"""
+    inference_config = config.get("inference", {})
+    prototype_labels = inference_config.get("prototype_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    threshold = inference_config.get("threshold", 0.55)
+    use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
+    neighborhood_config = inference_config.get("neighborhood_aware", {})
+    top_k = neighborhood_config.get("top_k", 15)
+    base_weight = neighborhood_config.get("base_weight", 0.5)
+    tc = inference_config.get("transductive_cluster", {})
+    top_k_connect = int(tc.get("top_k_connect", 25))
+    sim_connect_threshold = float(tc.get("sim_connect_threshold", 0.35))
+    min_cluster_size = int(tc.get("min_cluster_size", 4))
+    weighted_vote_fraction = float(tc.get("weighted_vote_fraction", 0.72))
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model = model.to(device)
+
+    train_embeddings, train_labels = _collect_embeddings(
+        model, datamodule.train_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    val_embeddings, val_labels = _collect_embeddings(
+        model, datamodule.val_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    test_embeddings, test_ids = _collect_embeddings(
+        model, datamodule.predict_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+
+    prototypes = compute_class_prototypes(
+        train_embeddings, train_labels, prototype_labels=prototype_labels
+    )
+    val_predictions, val_base_scores, val_neighbor_scores, val_final_scores = neighborhood_aware_predictions(
+        query_embeddings=val_embeddings,
+        prototypes=prototypes,
+        other_label=other_label,
+        threshold=threshold,
+        top_k=top_k,
+        base_weight=base_weight,
+    )
+    val_accuracy = (val_predictions == val_labels).float().mean().item()
+
+    all_gallery_embeddings, all_gallery_labels = combine_embedding_sets(
+        [(train_embeddings, train_labels), (val_embeddings, val_labels)]
+    )
+    final_prototypes = compute_class_prototypes(
+        all_gallery_embeddings, all_gallery_labels, prototype_labels=prototype_labels
+    )
+    test_predictions, test_base_scores, test_neighbor_scores, test_final_scores = neighborhood_aware_predictions(
+        query_embeddings=test_embeddings,
+        prototypes=final_prototypes,
+        other_label=other_label,
+        threshold=threshold,
+        top_k=top_k,
+        base_weight=base_weight,
+    )
+    test_refined = transductive_cluster_refinement(
+        test_embeddings,
+        test_predictions,
+        test_final_scores,
+        top_k_connect,
+        sim_connect_threshold,
+        min_cluster_size,
+        weighted_vote_fraction,
+    )
+
+    metrics = {
+        "mode": "transductive_neighborhood_aware",
+        "prototype_labels": prototype_labels,
+        "other_label": other_label,
+        "tta_horizontal_flip": use_horizontal_flip_tta,
+        "selected_threshold": float(threshold),
+        "val_accuracy": float(val_accuracy),
+        "neighborhood_aware": {
+            "top_k": int(top_k),
+            "base_weight": float(base_weight),
+            "neighbor_weight": float(1.0 - base_weight),
+        },
+        "transductive_cluster": {
+            "top_k_connect": top_k_connect,
+            "sim_connect_threshold": sim_connect_threshold,
+            "min_cluster_size": min_cluster_size,
+            "weighted_vote_fraction": weighted_vote_fraction,
+        },
+        "mean_val_base_score": float(val_base_scores.mean().item()),
+        "mean_val_neighbor_score": float(val_neighbor_scores.mean().item()),
+        "mean_val_final_score": float(val_final_scores.mean().item()),
+        "mean_test_base_score": float(test_base_scores.mean().item()),
+        "mean_test_neighbor_score": float(test_neighbor_scores.mean().item()),
+        "mean_test_final_score": float(test_final_scores.mean().item()),
+        "num_test_changed_by_transductive": int((test_refined != test_predictions).sum().item()),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred) for sample_id, pred in zip(test_ids.tolist(), test_refined.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
+def _run_neighborhood_aware_subcenter_inference(
+    config, datamodule, model, test_df, output_root: Path
+) -> list[int]:
+    """优先级 2：仅子中心 + neighborhood_aware（单模型，与 exp_047 超参对齐）。"""
+    inference_config = config.get("inference", {})
+    prototype_labels = inference_config.get("prototype_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    threshold = inference_config.get("threshold", 0.55)
+    use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
+    neighborhood_config = inference_config.get("neighborhood_aware", {})
+    top_k = neighborhood_config.get("top_k", 15)
+    base_weight = neighborhood_config.get("base_weight", 0.5)
+    sub_cfg = inference_config.get("subcenters", {})
+    k_subcenters = int(sub_cfg.get("k_subcenters", 4))
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model = model.to(device)
+
+    train_embeddings, train_labels = _collect_embeddings(
+        model, datamodule.train_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    val_embeddings, val_labels = _collect_embeddings(
+        model, datamodule.val_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    test_embeddings, test_ids = _collect_embeddings(
+        model, datamodule.predict_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+
+    sub_val = compute_subcenter_prototypes(
+        train_embeddings, train_labels, prototype_labels=prototype_labels, k_subcenters=k_subcenters
+    )
+    val_predictions, val_base_scores, val_neighbor_scores, val_final_scores = neighborhood_aware_subcenter_predictions(
+        val_embeddings,
+        sub_val,
+        prototype_labels,
+        other_label,
+        threshold,
+        top_k,
+        base_weight,
+    )
+    val_accuracy = (val_predictions == val_labels).float().mean().item()
+
+    all_gallery_embeddings, all_gallery_labels = combine_embedding_sets(
+        [(train_embeddings, train_labels), (val_embeddings, val_labels)]
+    )
+    final_sub = compute_subcenter_prototypes(
+        all_gallery_embeddings, all_gallery_labels, prototype_labels=prototype_labels, k_subcenters=k_subcenters
+    )
+    test_predictions, test_base_scores, test_neighbor_scores, test_final_scores = neighborhood_aware_subcenter_predictions(
+        test_embeddings,
+        final_sub,
+        prototype_labels,
+        other_label,
+        threshold,
+        top_k,
+        base_weight,
+    )
+
+    metrics = {
+        "mode": "neighborhood_aware_subcenter",
+        "prototype_labels": prototype_labels,
+        "other_label": other_label,
+        "tta_horizontal_flip": use_horizontal_flip_tta,
+        "selected_threshold": float(threshold),
+        "val_accuracy": float(val_accuracy),
+        "k_subcenters": k_subcenters,
+        "neighborhood_aware": {
+            "top_k": int(top_k),
+            "base_weight": float(base_weight),
+            "neighbor_weight": float(1.0 - base_weight),
+        },
+        "mean_val_base_score": float(val_base_scores.mean().item()),
+        "mean_val_neighbor_score": float(val_neighbor_scores.mean().item()),
+        "mean_val_final_score": float(val_final_scores.mean().item()),
+        "mean_test_base_score": float(test_base_scores.mean().item()),
+        "mean_test_neighbor_score": float(test_neighbor_scores.mean().item()),
+        "mean_test_final_score": float(test_final_scores.mean().item()),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred) for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
+def _run_cross_model_cascade_neighborhood_inference(
+    config,
+    datamodule,
+    test_df,
+    output_root: Path,
+) -> list[int]:
+    """优先级 3：双模型 neighborhood_aware（均值 prototype）+ 分歧级联；无子中心、无传导式。"""
+    inference_config = config.get("inference", {})
+    cmc = inference_config.get("cross_model_cascade", {})
+    prototype_labels = inference_config.get("prototype_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    threshold = float(inference_config.get("threshold", 0.55))
+    use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
+    neighborhood_config = inference_config.get("neighborhood_aware", {})
+    top_k = int(neighborhood_config.get("top_k", 15))
+    base_weight = float(neighborhood_config.get("base_weight", 0.5))
+    secondary_confirm_margin = float(cmc.get("secondary_confirm_margin", 0.05))
+
+    primary_exp = cmc.get("primary_experiment_name", "exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055")
+    secondary_exp = cmc.get("secondary_experiment_name", "exp_009_ir101_adaface_haar_10ep_laststage_ft")
+    primary_cfg_rel = cmc.get("primary_config_path")
+    secondary_cfg_rel = cmc.get("secondary_config_path")
+    cfg_primary = load_experiment_config(
+        primary_cfg_rel if primary_cfg_rel else project_path("configs", "experiments", f"{primary_exp}.yaml")
+    )
+    cfg_secondary = load_experiment_config(
+        secondary_cfg_rel if secondary_cfg_rel else project_path("configs", "experiments", f"{secondary_exp}.yaml")
+    )
+
+    primary_ckpt = cmc.get("primary_checkpoint_path") or _checkpoint_from_experiment_name(primary_exp)
+    secondary_ckpt = cmc.get("secondary_checkpoint_path") or _checkpoint_from_experiment_name(secondary_exp)
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model_vit = _load_model_from_checkpoint(cfg_primary, primary_ckpt).to(device)
+    model_ir = _load_model_from_checkpoint(cfg_secondary, secondary_ckpt).to(device)
+
+    train_e_v, train_l_v = _collect_embeddings(
+        model_vit, datamodule.train_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    val_e_v, val_l_v = _collect_embeddings(
+        model_vit, datamodule.val_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    test_e_v, test_ids = _collect_embeddings(
+        model_vit, datamodule.predict_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+
+    train_e_i, train_l_i = _collect_embeddings(
+        model_ir, datamodule.train_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    val_e_i, val_l_i = _collect_embeddings(
+        model_ir, datamodule.val_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    test_e_i, _ = _collect_embeddings(
+        model_ir, datamodule.predict_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+
+    proto_v_tr = compute_class_prototypes(train_e_v, train_l_v, prototype_labels=prototype_labels)
+    proto_i_tr = compute_class_prototypes(train_e_i, train_l_i, prototype_labels=prototype_labels)
+
+    val_pred_v, _, _, val_score_v = neighborhood_aware_predictions(
+        val_e_v, proto_v_tr, other_label, threshold, top_k, base_weight
+    )
+    val_pred_i, _, _, val_score_i = neighborhood_aware_predictions(
+        val_e_i, proto_i_tr, other_label, threshold, top_k, base_weight
+    )
+    val_cascade = cross_model_disagreement_resolve(
+        val_pred_v, val_score_v, val_pred_i, val_score_i, other_label, secondary_confirm_margin
+    )
+    val_accuracy = (val_cascade == val_l_v).float().mean().item()
+
+    gallery_v_e, gallery_v_l = combine_embedding_sets([(train_e_v, train_l_v), (val_e_v, val_l_v)])
+    gallery_i_e, gallery_i_l = combine_embedding_sets([(train_e_i, train_l_i), (val_e_i, val_l_i)])
+
+    proto_v = compute_class_prototypes(gallery_v_e, gallery_v_l, prototype_labels=prototype_labels)
+    proto_i = compute_class_prototypes(gallery_i_e, gallery_i_l, prototype_labels=prototype_labels)
+
+    test_pred_v, _, _, test_score_v = neighborhood_aware_predictions(
+        test_e_v, proto_v, other_label, threshold, top_k, base_weight
+    )
+    test_pred_i, _, _, test_score_i = neighborhood_aware_predictions(
+        test_e_i, proto_i, other_label, threshold, top_k, base_weight
+    )
+    test_cascade = cross_model_disagreement_resolve(
+        test_pred_v, test_score_v, test_pred_i, test_score_i, other_label, secondary_confirm_margin
+    )
+
+    metrics = {
+        "mode": "cross_model_cascade_neighborhood",
+        "prototype_labels": prototype_labels,
+        "other_label": other_label,
+        "tta_horizontal_flip": use_horizontal_flip_tta,
+        "selected_threshold": threshold,
+        "val_accuracy": val_accuracy,
+        "primary_experiment_name": primary_exp,
+        "secondary_experiment_name": secondary_exp,
+        "primary_checkpoint": primary_ckpt,
+        "secondary_checkpoint": secondary_ckpt,
+        "neighborhood_aware": {"top_k": top_k, "base_weight": base_weight},
+        "secondary_confirm_margin": secondary_confirm_margin,
+        "mean_val_vit_final_score": float(val_score_v.mean().item()),
+        "mean_val_ir_final_score": float(val_score_i.mean().item()),
+        "mean_test_vit_final_score": float(test_score_v.mean().item()),
+        "mean_test_ir_final_score": float(test_score_i.mean().item()),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred) for sample_id, pred in zip(test_ids.tolist(), test_cascade.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
+def _checkpoint_from_experiment_name(exp_name: str) -> str:
+    metrics_path = project_path("outputs", exp_name, "metrics.json")
+    if not metrics_path.exists():
+        raise FileNotFoundError(f"未找到实验 metrics：{metrics_path}")
+    return json.loads(metrics_path.read_text(encoding="utf-8"))["best_model_path"]
+
+
+def _run_neighborhood_score_fusion_inference(
+    config,
+    datamodule,
+    test_df,
+    output_root: Path,
+) -> list[int]:
+    """ViT + LVFace：两路 ``neighborhood_aware`` 的 ``final_score`` 线性融合；验证集网格搜 ``alpha`` 与 ``threshold``。"""
+    inference_config = config.get("inference", {})
+    nfs = inference_config.get("neighborhood_score_fusion", {})
+    prototype_labels = inference_config.get("prototype_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
+    neighborhood_config = inference_config.get("neighborhood_aware", {})
+    top_k = int(neighborhood_config.get("top_k", 15))
+    base_weight = float(neighborhood_config.get("base_weight", 0.5))
+
+    primary_exp = nfs.get("primary_experiment_name", "exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055")
+    secondary_exp = nfs.get(
+        "secondary_experiment_name",
+        "exp_056_lvface_b_glint360k_frozen_neighborhoodaware_fixed055_hfliptta",
+    )
+    primary_cfg_rel = nfs.get("primary_config_path")
+    secondary_cfg_rel = nfs.get("secondary_config_path")
+    cfg_primary = load_experiment_config(
+        primary_cfg_rel if primary_cfg_rel else project_path("configs", "experiments", f"{primary_exp}.yaml")
+    )
+    cfg_secondary = load_experiment_config(
+        secondary_cfg_rel if secondary_cfg_rel else project_path("configs", "experiments", f"{secondary_exp}.yaml")
+    )
+
+    primary_ckpt = nfs.get("primary_checkpoint_path") or _checkpoint_from_experiment_name(primary_exp)
+    secondary_ckpt = nfs.get("secondary_checkpoint_path") or _checkpoint_from_experiment_name(secondary_exp)
+
+    alpha_values = [float(x) for x in nfs.get("alpha_values", [0.0, 0.25, 0.5, 0.75, 1.0])]
+    threshold_values = [float(x) for x in nfs.get("threshold_values", [0.25, 0.35, 0.45, 0.55])]
+
+    # 与 neighborhood_aware 内部一致：极低阈值等价于仅取 prototype argmax，不把样本判为 other
+    _argmax_only_threshold = float(nfs.get("argmax_only_threshold", -1e9))
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model_vit = _load_model_from_checkpoint(cfg_primary, primary_ckpt).to(device)
+    model_lv = _load_model_from_checkpoint(cfg_secondary, secondary_ckpt).to(device)
+
+    train_e_v, train_l_v = _collect_embeddings(
+        model_vit, datamodule.train_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    val_e_v, val_l_v = _collect_embeddings(
+        model_vit, datamodule.val_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    test_e_v, test_ids = _collect_embeddings(
+        model_vit, datamodule.predict_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+
+    train_e_lv, train_l_lv = _collect_embeddings(
+        model_lv, datamodule.train_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    val_e_lv, _ = _collect_embeddings(
+        model_lv, datamodule.val_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    test_e_lv, _ = _collect_embeddings(
+        model_lv, datamodule.predict_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+
+    proto_v_tr = compute_class_prototypes(train_e_v, train_l_v, prototype_labels=prototype_labels)
+    proto_lv_tr = compute_class_prototypes(train_e_lv, train_l_lv, prototype_labels=prototype_labels)
+
+    val_pred_v_argmax, _, _, val_score_v = neighborhood_aware_predictions(
+        val_e_v,
+        proto_v_tr,
+        other_label,
+        _argmax_only_threshold,
+        top_k,
+        base_weight,
+    )
+    _, _, _, val_score_lv = neighborhood_aware_predictions(
+        val_e_lv,
+        proto_lv_tr,
+        other_label,
+        _argmax_only_threshold,
+        top_k,
+        base_weight,
+    )
+
+    best_alpha = alpha_values[0]
+    best_tau = threshold_values[0]
+    best_val_acc = -1.0
+    grid_details: list[dict[str, float]] = []
+    for alpha in alpha_values:
+        for tau in threshold_values:
+            val_pred_f = neighborhood_score_fusion_predictions(
+                val_pred_v_argmax,
+                val_score_v,
+                val_score_lv,
+                other_label,
+                alpha,
+                tau,
+            )
+            acc = (val_pred_f == val_l_v).float().mean().item()
+            grid_details.append({"alpha": alpha, "threshold": tau, "val_accuracy": acc})
+            if acc > best_val_acc:
+                best_val_acc = acc
+                best_alpha = alpha
+                best_tau = tau
+
+    gallery_v_e, gallery_v_l = combine_embedding_sets([(train_e_v, train_l_v), (val_e_v, val_l_v)])
+    gallery_lv_e, gallery_lv_l = combine_embedding_sets([(train_e_lv, train_l_lv), (val_e_lv, val_l_v)])
+
+    proto_v = compute_class_prototypes(gallery_v_e, gallery_v_l, prototype_labels=prototype_labels)
+    proto_lv = compute_class_prototypes(gallery_lv_e, gallery_lv_l, prototype_labels=prototype_labels)
+
+    test_pred_v_argmax, _, _, test_score_v = neighborhood_aware_predictions(
+        test_e_v,
+        proto_v,
+        other_label,
+        _argmax_only_threshold,
+        top_k,
+        base_weight,
+    )
+    _, _, _, test_score_lv = neighborhood_aware_predictions(
+        test_e_lv,
+        proto_lv,
+        other_label,
+        _argmax_only_threshold,
+        top_k,
+        base_weight,
+    )
+
+    test_predictions = neighborhood_score_fusion_predictions(
+        test_pred_v_argmax,
+        test_score_v,
+        test_score_lv,
+        other_label,
+        best_alpha,
+        best_tau,
+    )
+
+    metrics = {
+        "mode": "neighborhood_score_fusion",
+        "prototype_labels": prototype_labels,
+        "other_label": other_label,
+        "tta_horizontal_flip": use_horizontal_flip_tta,
+        "selected_alpha": float(best_alpha),
+        "selected_threshold": float(best_tau),
+        "val_accuracy": float(best_val_acc),
+        "primary_experiment_name": primary_exp,
+        "secondary_experiment_name": secondary_exp,
+        "primary_checkpoint": primary_ckpt,
+        "secondary_checkpoint": secondary_ckpt,
+        "neighborhood_aware": {"top_k": top_k, "base_weight": base_weight},
+        "neighborhood_score_fusion": {
+            "alpha_values": alpha_values,
+            "threshold_values": threshold_values,
+            "grid_search": grid_details,
+            "argmax_only_threshold": _argmax_only_threshold,
+        },
+        "mean_val_vit_final_score": float(val_score_v.mean().item()),
+        "mean_val_lvface_final_score": float(val_score_lv.mean().item()),
+        "mean_test_vit_final_score": float(test_score_v.mean().item()),
+        "mean_test_lvface_final_score": float(test_score_lv.mean().item()),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred) for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
+def _run_transductive_subcenter_cascade_inference(
+    config,
+    datamodule,
+    test_df,
+    output_root: Path,
+) -> list[int]:
+    """子中心 + neighborhood + 双模型级联 + test 集传导式簇投票（ViT 主、IR101 辅）。"""
+    inference_config = config.get("inference", {})
+    tsc = inference_config.get("transductive_subcenter_cascade", {})
+    prototype_labels = inference_config.get("prototype_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    threshold = float(inference_config.get("threshold", 0.55))
+    use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
+    neighborhood_config = inference_config.get("neighborhood_aware", {})
+    top_k = int(neighborhood_config.get("top_k", 15))
+    base_weight = float(neighborhood_config.get("base_weight", 0.5))
+
+    k_subcenters = int(tsc.get("k_subcenters", 4))
+    secondary_confirm_margin = float(tsc.get("secondary_confirm_margin", 0.05))
+    top_k_connect = int(tsc.get("top_k_connect", 25))
+    sim_connect_threshold = float(tsc.get("sim_connect_threshold", 0.35))
+    min_cluster_size = int(tsc.get("min_cluster_size", 4))
+    weighted_vote_fraction = float(tsc.get("weighted_vote_fraction", 0.72))
+
+    primary_exp = tsc.get("primary_experiment_name", "exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055")
+    secondary_exp = tsc.get("secondary_experiment_name", "exp_009_ir101_adaface_haar_10ep_laststage_ft")
+    primary_cfg_rel = tsc.get("primary_config_path")
+    secondary_cfg_rel = tsc.get("secondary_config_path")
+    cfg_primary = load_experiment_config(
+        primary_cfg_rel if primary_cfg_rel else project_path("configs", "experiments", f"{primary_exp}.yaml")
+    )
+    cfg_secondary = load_experiment_config(
+        secondary_cfg_rel if secondary_cfg_rel else project_path("configs", "experiments", f"{secondary_exp}.yaml")
+    )
+
+    primary_ckpt = tsc.get("primary_checkpoint_path") or _checkpoint_from_experiment_name(primary_exp)
+    secondary_ckpt = tsc.get("secondary_checkpoint_path") or _checkpoint_from_experiment_name(secondary_exp)
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model_vit = _load_model_from_checkpoint(cfg_primary, primary_ckpt).to(device)
+    model_ir = _load_model_from_checkpoint(cfg_secondary, secondary_ckpt).to(device)
+
+    train_e_v, train_l_v = _collect_embeddings(
+        model_vit, datamodule.train_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    val_e_v, val_l_v = _collect_embeddings(
+        model_vit, datamodule.val_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    test_e_v, test_ids = _collect_embeddings(
+        model_vit, datamodule.predict_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+
+    train_e_i, train_l_i = _collect_embeddings(
+        model_ir, datamodule.train_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    val_e_i, val_l_i = _collect_embeddings(
+        model_ir, datamodule.val_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+    test_e_i, _ = _collect_embeddings(
+        model_ir, datamodule.predict_dataloader(), device, use_horizontal_flip_tta=use_horizontal_flip_tta
+    )
+
+    sub_v_val = compute_subcenter_prototypes(
+        train_e_v, train_l_v, prototype_labels=prototype_labels, k_subcenters=k_subcenters
+    )
+    sub_i_val = compute_subcenter_prototypes(
+        train_e_i, train_l_i, prototype_labels=prototype_labels, k_subcenters=k_subcenters
+    )
+
+    val_pred_v, _, _, val_score_v = neighborhood_aware_subcenter_predictions(
+        val_e_v,
+        sub_v_val,
+        prototype_labels,
+        other_label,
+        threshold,
+        top_k,
+        base_weight,
+    )
+    val_pred_i, _, _, val_score_i = neighborhood_aware_subcenter_predictions(
+        val_e_i,
+        sub_i_val,
+        prototype_labels,
+        other_label,
+        threshold,
+        top_k,
+        base_weight,
+    )
+    val_cascade = cross_model_disagreement_resolve(
+        val_pred_v,
+        val_score_v,
+        val_pred_i,
+        val_score_i,
+        other_label,
+        secondary_confirm_margin,
+    )
+    val_accuracy = (val_cascade == val_l_v).float().mean().item()
+
+    gallery_v_e, gallery_v_l = combine_embedding_sets(
+        [(train_e_v, train_l_v), (val_e_v, val_l_v)]
+    )
+    gallery_i_e, gallery_i_l = combine_embedding_sets(
+        [(train_e_i, train_l_i), (val_e_i, val_l_i)]
+    )
+
+    final_sub_v = compute_subcenter_prototypes(
+        gallery_v_e, gallery_v_l, prototype_labels=prototype_labels, k_subcenters=k_subcenters
+    )
+    final_sub_i = compute_subcenter_prototypes(
+        gallery_i_e, gallery_i_l, prototype_labels=prototype_labels, k_subcenters=k_subcenters
+    )
+
+    test_pred_v, _, _, test_score_v = neighborhood_aware_subcenter_predictions(
+        test_e_v,
+        final_sub_v,
+        prototype_labels,
+        other_label,
+        threshold,
+        top_k,
+        base_weight,
+    )
+    test_pred_i, _, _, test_score_i = neighborhood_aware_subcenter_predictions(
+        test_e_i,
+        final_sub_i,
+        prototype_labels,
+        other_label,
+        threshold,
+        top_k,
+        base_weight,
+    )
+    test_cascade = cross_model_disagreement_resolve(
+        test_pred_v,
+        test_score_v,
+        test_pred_i,
+        test_score_i,
+        other_label,
+        secondary_confirm_margin,
+    )
+    fused_conf = torch.maximum(test_score_v, test_score_i)
+    test_final = transductive_cluster_refinement(
+        test_e_v,
+        test_cascade,
+        fused_conf,
+        top_k_connect,
+        sim_connect_threshold,
+        min_cluster_size,
+        weighted_vote_fraction,
+    )
+
+    metrics = {
+        "mode": "transductive_subcenter_cascade",
+        "prototype_labels": prototype_labels,
+        "other_label": other_label,
+        "tta_horizontal_flip": use_horizontal_flip_tta,
+        "selected_threshold": threshold,
+        "val_accuracy": val_accuracy,
+        "primary_experiment_name": primary_exp,
+        "secondary_experiment_name": secondary_exp,
+        "primary_checkpoint": primary_ckpt,
+        "secondary_checkpoint": secondary_ckpt,
+        "k_subcenters": k_subcenters,
+        "neighborhood_aware": {"top_k": top_k, "base_weight": base_weight},
+        "transductive": {
+            "top_k_connect": top_k_connect,
+            "sim_connect_threshold": sim_connect_threshold,
+            "min_cluster_size": min_cluster_size,
+            "weighted_vote_fraction": weighted_vote_fraction,
+        },
+        "secondary_confirm_margin": secondary_confirm_margin,
+        "num_test_changed_by_transductive": int((test_final != test_cascade).sum().item()),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred) for sample_id, pred in zip(test_ids.tolist(), test_final.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="加载最佳模型并生成 submission.csv。")
     parser.add_argument("--config", required=True)
@@ -1475,11 +2170,23 @@ def main() -> None:
     loss_config = config.get("loss", {})
 
     inference_mode = config.get("inference", {}).get("mode", "softmax")
+    dual_checkpoint_modes = (
+        "transductive_subcenter_cascade",
+        "cross_model_cascade_neighborhood",
+        "neighborhood_score_fusion",
+    )
     checkpoint_path = args.checkpoint
-    if checkpoint_path is None and inference_mode != "ensemble_prototype":
+    if checkpoint_path is None and inference_mode not in ("ensemble_prototype", *dual_checkpoint_modes):
         metrics_path = output_root / "metrics.json"
         if not metrics_path.exists():
-            raise FileNotFoundError("未找到 metrics.json，无法自动定位最佳模型。")
+            fallback_exp = config.get("inference", {}).get("checkpoint_source_experiment")
+            if fallback_exp:
+                metrics_path = project_path("outputs", fallback_exp, "metrics.json")
+        if not metrics_path.exists():
+            raise FileNotFoundError(
+                "未找到 metrics.json，无法自动定位最佳模型。"
+                "可设置 inference.checkpoint_source_experiment 指向已有训练实验目录名，或传 --checkpoint。"
+            )
         checkpoint_path = json.loads(metrics_path.read_text(encoding="utf-8"))["best_model_path"]
 
     train_df = pd.read_csv(splits_dir / "train.csv")
@@ -1497,7 +2204,7 @@ def main() -> None:
     datamodule.setup()
 
     model = None
-    if inference_mode != "ensemble_prototype":
+    if inference_mode not in ("ensemble_prototype", *dual_checkpoint_modes):
         model = FaceClassifierModule.load_from_checkpoint(
             checkpoint_path,
             model_family=config["model"]["family"],
@@ -1511,9 +2218,12 @@ def main() -> None:
             scheduler_name=config["train"]["scheduler"],
             max_epochs=config["train"]["max_epochs"],
             pretrained_repo_id=config["model"].get("pretrained_repo_id"),
+            pretrained_checkpoint_path=config["model"].get("pretrained_checkpoint_path"),
             freeze_backbone=config["model"].get("freeze_backbone", False),
             unfreeze_last_stage=config["model"].get("unfreeze_last_stage", False),
             unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
+            unfreeze_cvlface_norm=config["model"].get("unfreeze_cvlface_norm", True),
+            unfreeze_cvlface_feature=config["model"].get("unfreeze_cvlface_feature", True),
             loss_name=loss_config.get("name", "cross_entropy"),
             loss_target_labels=loss_config.get("target_labels"),
             arcface_scale=loss_config.get("arcface_scale", 30.0),
@@ -1541,6 +2251,22 @@ def main() -> None:
         ordered_predictions = _run_pca_whitened_prototype_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "neighborhood_aware":
         ordered_predictions = _run_neighborhood_aware_inference(config, datamodule, model, test_df, output_root)
+    elif inference_mode == "transductive_neighborhood_aware":
+        ordered_predictions = _run_transductive_neighborhood_aware_inference(
+            config, datamodule, model, test_df, output_root
+        )
+    elif inference_mode == "neighborhood_aware_subcenter":
+        ordered_predictions = _run_neighborhood_aware_subcenter_inference(
+            config, datamodule, model, test_df, output_root
+        )
+    elif inference_mode == "cross_model_cascade_neighborhood":
+        ordered_predictions = _run_cross_model_cascade_neighborhood_inference(
+            config, datamodule, test_df, output_root
+        )
+    elif inference_mode == "neighborhood_score_fusion":
+        ordered_predictions = _run_neighborhood_score_fusion_inference(config, datamodule, test_df, output_root)
+    elif inference_mode == "transductive_subcenter_cascade":
+        ordered_predictions = _run_transductive_subcenter_cascade_inference(config, datamodule, test_df, output_root)
     elif inference_mode == "ensemble_prototype":
         ordered_predictions = _run_ensemble_prototype_inference(config, datamodule, test_df, output_root)
     elif inference_mode == "exemplar_knn":
@@ -1566,6 +2292,38 @@ def main() -> None:
 
         ordered_predictions = [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
     submission = build_submission_dataframe(test_df, ordered_predictions)
+
+    if args.checkpoint is None and inference_mode in dual_checkpoint_modes:
+        if inference_mode == "transductive_subcenter_cascade":
+            tsc = config.get("inference", {}).get("transductive_subcenter_cascade", {})
+            pe = tsc.get("primary_experiment_name", "exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055")
+            se = tsc.get("secondary_experiment_name", "exp_009_ir101_adaface_haar_10ep_laststage_ft")
+            checkpoint_path = (
+                tsc.get("primary_checkpoint_path") or _checkpoint_from_experiment_name(pe)
+            ) + " | " + (
+                tsc.get("secondary_checkpoint_path") or _checkpoint_from_experiment_name(se)
+            )
+        elif inference_mode == "neighborhood_score_fusion":
+            nfs = config.get("inference", {}).get("neighborhood_score_fusion", {})
+            pe = nfs.get("primary_experiment_name", "exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055")
+            se = nfs.get(
+                "secondary_experiment_name",
+                "exp_056_lvface_b_glint360k_frozen_neighborhoodaware_fixed055_hfliptta",
+            )
+            checkpoint_path = (
+                nfs.get("primary_checkpoint_path") or _checkpoint_from_experiment_name(pe)
+            ) + " | " + (
+                nfs.get("secondary_checkpoint_path") or _checkpoint_from_experiment_name(se)
+            )
+        else:
+            cmc = config.get("inference", {}).get("cross_model_cascade", {})
+            pe = cmc.get("primary_experiment_name", "exp_032_vit_adaface_haar_1ep_frozen_prototype_fixed055")
+            se = cmc.get("secondary_experiment_name", "exp_009_ir101_adaface_haar_10ep_laststage_ft")
+            checkpoint_path = (
+                cmc.get("primary_checkpoint_path") or _checkpoint_from_experiment_name(pe)
+            ) + " | " + (
+                cmc.get("secondary_checkpoint_path") or _checkpoint_from_experiment_name(se)
+            )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     submission_path = project_path(

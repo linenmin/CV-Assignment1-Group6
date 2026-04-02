@@ -6,9 +6,14 @@ from sklearn.model_selection import StratifiedKFold
 from dl_pipeline.inference.prototype import (
     average_normalized_embedding_sets,
     combine_embedding_sets,
+    compute_subcenter_prototypes,
     conservative_graph_refine_predictions,
     compute_similarity_matrix,
     compute_class_prototypes,
+    cross_model_disagreement_resolve,
+    neighborhood_score_fusion_predictions,
+    neighborhood_aware_subcenter_predictions,
+    transductive_cluster_refinement,
     fuse_similarity_matrices,
     global_label_spread_predictions,
     neighborhood_aware_predictions,
@@ -62,6 +67,57 @@ class PrototypeInferenceTests(unittest.TestCase):
         self.assertLess(base_scores[0].item(), 0.75)
         self.assertGreater(neighbor_scores[0].item(), 0.75)
         self.assertGreaterEqual(final_scores[0].item(), 0.75)
+
+    def test_cross_model_disagreement_resolve_adopts_secondary_when_primary_other(self):
+        pred_v = torch.tensor([0, 1, 0, 2], dtype=torch.long)
+        score_v = torch.tensor([0.4, 0.6, 0.5, 0.7], dtype=torch.float32)
+        pred_i = torch.tensor([1, 1, 2, 2], dtype=torch.long)
+        score_i = torch.tensor([0.65, 0.6, 0.7, 0.65], dtype=torch.float32)
+        out = cross_model_disagreement_resolve(pred_v, score_v, pred_i, score_i, other_label=0, secondary_confirm_margin=0.05)
+        self.assertEqual(out.tolist(), [1, 1, 2, 2])
+
+    def test_neighborhood_score_fusion_thresholds_on_fused_score(self):
+        pred_v = torch.tensor([1, 2, 1], dtype=torch.long)
+        s_v = torch.tensor([0.5, 0.6, 0.4], dtype=torch.float32)
+        s_l = torch.tensor([0.5, 0.4, 0.6], dtype=torch.float32)
+        out = neighborhood_score_fusion_predictions(pred_v, s_v, s_l, other_label=0, alpha=0.5, threshold=0.55)
+        # fused: [0.5, 0.5, 0.5] all < 0.55 -> other
+        self.assertEqual(out.tolist(), [0, 0, 0])
+        out2 = neighborhood_score_fusion_predictions(pred_v, s_v, s_l, other_label=0, alpha=1.0, threshold=0.45)
+        # only s_v: 0.5, 0.6, 0.4 vs th=0.45 -> keep 1, keep 2, reject
+        self.assertEqual(out2.tolist(), [1, 2, 0])
+
+    def test_transductive_cluster_refinement_majority_within_component(self):
+        emb = torch.eye(4, dtype=torch.float32)
+        base = torch.tensor([0, 1, 0, 2], dtype=torch.long)
+        scores = torch.ones(4, dtype=torch.float32)
+        out = transductive_cluster_refinement(
+            emb,
+            base,
+            scores,
+            top_k_connect=3,
+            sim_connect_threshold=0.0,
+            min_cluster_size=2,
+            weighted_vote_fraction=0.5,
+        )
+        self.assertEqual(out.tolist(), [0, 0, 0, 0])
+
+    def test_neighborhood_aware_subcenter_k_one_matches_mean_prototype(self):
+        labels = torch.tensor([1, 1, 2, 2], dtype=torch.long)
+        emb = torch.tensor(
+            [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+            dtype=torch.float32,
+        )
+        sub = compute_subcenter_prototypes(emb, labels, prototype_labels=[1, 2], k_subcenters=1)
+        prototypes = compute_class_prototypes(emb, labels, prototype_labels=[1, 2])
+        q = torch.tensor([[0.9, 0.1], [0.1, 0.9]], dtype=torch.float32)
+        p_sub, _, _, _ = neighborhood_aware_subcenter_predictions(
+            q, sub, [1, 2], other_label=0, threshold=0.5, top_k=1, base_weight=1.0
+        )
+        p_mean, _, _, _ = neighborhood_aware_predictions(
+            q, prototypes, other_label=0, threshold=0.5, top_k=1, base_weight=1.0
+        )
+        self.assertTrue(torch.equal(p_sub, p_mean))
 
     def test_spectral_cluster_with_gallery_label_matching_assigns_clusters_from_gallery_neighbors(self):
         gallery_embeddings = torch.tensor(

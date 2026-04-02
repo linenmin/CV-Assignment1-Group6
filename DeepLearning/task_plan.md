@@ -42,6 +42,7 @@
 - Kaggle 迭代阶段优先采用 `csv` 提交，等方案收敛后再回填 notebook。
 - 协作方式采用共享 pipeline、轮流迭代，不按子模块永久分工。
 - 当前最强线上结果是 `exp_047 = 0.92621`，对应协议为：`frozen ViT AdaFace + hflip TTA + neighborhood-aware scoring + fixed threshold 0.55`。
+- `exp_048` 已完成对 `neighborhood_aware` 的 `top_k × base_weight` 全网格离线扫描（`reports/sweeps/neighborhood_aware_grid_latest.json`）；**迁移统计与选参均以 baseline submission 按 `id` 对齐为准**；自动 winner 与 `exp_047` 一致 `(15, 0.5)`。保守候选 `top_k=5, bw=0.6` 已提交 Kaggle，**public `0.92511` < `exp_047` 的 `0.92621`**，已证伪为线上主分支。
 - `threshold = 0.55` 视为当前锁定的评测协议；在模型探索阶段不再继续自由搜索阈值。
 - `exp_023 ~ exp_027` 已验证多种更复杂的开放集推理思路，但当前实现大多会把过多 `other` 放宽为目标类，因此暂不消耗 Kaggle 配额继续提交。
 - 当前阶段的实验优先级应从“小幅边界调参”转为“只有明显不同的方法层变化才值得提交”，例如 score/model fusion 或训练目标对齐。

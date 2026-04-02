@@ -1,0 +1,56 @@
+# ViT AdaFace：解冻最后 4 个 block + 三类 ArcFace（含 other），
+# 推理与 exp_047 同款 neighborhood_aware + 固定阈值 0.55 + HFlip TTA。
+# early_stopping_patience=4：历史曲线少见“先升后降”，早停略紧以节省训练时间。
+
+experiment_name: exp_060_vit_adaface_haar_15ep_last4block_arcface3class_neighborhoodaware_fixed055_hfliptta
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+  # Windows 上 num_workers>0 时 DataLoader 子进程偶发长时间无输出/似卡住；调试用 0 更稳
+  num_workers: 0
+
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 4
+  unfreeze_cvlface_norm: true
+  unfreeze_cvlface_feature: true
+  dropout: 0.3
+
+loss:
+  name: arcface
+  target_labels: [0, 1, 2]
+  arcface_scale: 16.0
+  arcface_margin: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 15
+  learning_rate: 0.0001
+  backbone_learning_rate: 0.000005
+  weight_decay: 0.0001
+  monitor_metric: val_target_loss
+  monitor_mode: min
+  early_stopping_patience: 4
+  scheduler: cosine
+
+augmentation:
+  use_horizontal_flip: false
+
+inference:
+  mode: neighborhood_aware
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold: 0.55
+  tta_horizontal_flip: true
+  neighborhood_aware:
+    top_k: 15
+    base_weight: 0.5

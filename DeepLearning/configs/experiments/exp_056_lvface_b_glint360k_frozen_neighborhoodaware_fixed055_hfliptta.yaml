@@ -1,0 +1,43 @@
+# LVFace-B (Glint360K) 冻结 backbone + 与 exp_047 对齐的 neighborhood_aware + hflip TTA。
+# 权重：从 HuggingFace 下载 LVFace-B_Glint360K.pt 放到 models/pretrained/（路径见下方，相对工程根目录）。
+# 上游 eval 命令：--network vit_b_dp005_mask_005（见 third_party/LVFace/README.md）
+
+experiment_name: exp_056_lvface_b_glint360k_frozen_neighborhoodaware_fixed055_hfliptta
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+
+model:
+  family: lvface
+  backbone_name: vit_b_dp005_mask_005
+  pretrained: false
+  pretrained_checkpoint_path: models/pretrained/LVFace-B_Glint360K.pt
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 0
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 1
+  learning_rate: 0.0003
+  backbone_learning_rate:
+  weight_decay: 0.0001
+  early_stopping_patience: 1
+
+augmentation:
+  use_horizontal_flip: false
+
+inference:
+  mode: neighborhood_aware
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold: 0.55
+  tta_horizontal_flip: true
+  neighborhood_aware:
+    top_k: 15
+    base_weight: 0.5

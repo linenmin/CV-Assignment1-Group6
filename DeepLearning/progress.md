@@ -999,3 +999,43 @@
   - 因而它是当前最接近“值得提交验证”的推理改进候选之一。
 - 线上 Kaggle public score 已确认是 `0.92621`，超过 `exp_032 = 0.92180`；
 - 因此 `exp_047` 已更新为新的 strongest online baseline。
+
+### Session 45
+
+- 已按计划执行 **neighborhood_aware 参数网格扫描**（`top_k ∈ {5,10,15,20,30}` × `base_weight ∈ {0.3,0.4,0.5,0.6,0.7}`），脚本：`scripts/sweep_neighborhood_aware.py`，结果：`reports/sweeps/neighborhood_aware_grid_latest.json`。
+- 扫描结论（**以 baseline submission 按 `id` 对齐后的迁移为准**，不用小验证集做主排序）：
+  - 全部组合中 **没有任何一组的 `val_accuracy` 超过 `0.9375`**（仅作旁注）；
+  - 与 `exp_047` baseline submission **逐行完全一致** 的「等价 plateau」包含多组参数；脚本初版曾用 **DataLoader 行序与按 `id` 排序后的 CSV 直接 zip**，在一般情形下可能错位；已改为 **`baseline.merge(候选, on='id')`** 再统计 `0->1` 等迁移；
+  - 自动选参已改为 **submission 优先**：先最小化 `(0->1 + 0->2)`，再最小化 `total_changed`，再优先贴近 `exp_047` 的 `(top_k=15, base_weight=0.5)`。当前输出 winner 为 **`top_k=15, base_weight=0.5`**（与 `exp_047` 一致，而非此前误用的 `val` 平局规则）。
+- 在扫描结果中另选 **保守外推候选**（相对 `exp_047` 仅 `1` 张 `2 -> 0`，`val` 仍为 `0.9375`）：
+  - 实验名：`exp_048_vit_adaface_haar_1ep_frozen_neighborhood_topk5_bw06_fixed055_hfliptta`
+  - 配置：`top_k=5`, `base_weight=0.6`（更信任 prototype base score）
+  - submission：`data/submissions/20260402_172254_exp_048_vit_adaface_haar_1ep_frozen_neighborhood_topk5_bw06_fixed055_hfliptta_submission.csv`
+  - `prototype_metrics` 已写入：`outputs/exp_048_vit_adaface_haar_1ep_frozen_neighborhood_topk5_bw06_fixed055_hfliptta/prototype_metrics.json`
+- 当前最强线上基线仍为 **`exp_047 = 0.92621`**；`exp_048` 已提交 Kaggle 对照：**public score `0.92511`**，低于 `exp_047` 约 `0.00110`。
+- 结论：离线仅 `1` 张 `2->0` 的「更保守」邻域参数在线上仍为负向；**不应以 `exp_048` 替代 `exp_047`**，后续 neighborhood 线继续以 `(top_k=15, base_weight=0.5)` 为锚。
+
+### Session 46
+
+- 已落实 **exp_049**：在 **不保留独立训练 hold-out** 的意义下，将 `train.csv` 与 `val.csv` 合并为 **80 张**训练集，仅解冻 ViT **最后 2 个 block**（与 exp_037 一致），`backbone_lr=1e-5`，**固定 5 epoch**；checkpoint 采用 **`save_last`**（不做 `val_acc` 选优）；推理与 **exp_047** 对齐：`neighborhood_aware`、`top_k=15`、`base_weight=0.5`、`threshold=0.55`、**hflip TTA**。
+- 工程改动：
+  - `data.use_full_train: true`：`FaceDataModule` 在 `setup` 时按 `id` 排序拼接 train+val 作为 `train_dataset`；验证集 DataLoader 仍为原 `val.csv`（指标有泄漏，仅作日志，不用于早停）。
+  - `scripts/train.py`：在 `use_full_train` 时关闭 `EarlyStopping` 与按指标 `ModelCheckpoint`，训练结束将 `metrics.json` 的 `best_model_path` 指向 **`last*.ckpt`**。
+- 产物：
+  - 配置：`configs/experiments/exp_049_vit_adaface_haar_5ep_last2blockonly_ft_fulltrain_neighborhoodaware_fixed055_hfliptta.yaml`
+  - checkpoint：`outputs/exp_049_vit_adaface_haar_5ep_last2blockonly_ft_fulltrain_neighborhoodaware_fixed055_hfliptta/checkpoints/last-v1.ckpt`
+  - submission：`data/submissions/20260402_193642_exp_049_vit_adaface_haar_5ep_last2blockonly_ft_fulltrain_neighborhoodaware_fixed055_hfliptta_submission.csv`
+- **与 exp_047 submission 按 `id` 对齐**：`1816` 条测试 **预测类别逐行完全一致**（`diff=0`）。说明在当前推理协议下，5 epoch 全量微调后的 embedding 未改变任一测试样本的最终离散决策；Kaggle 上预期与 `0.92621` 一致或极接近，可按需再提交一次确认。
+- 备注：本机 `conda run -n gpu_env` 曾因控制台 **GBK 打印 Unicode** 报错；训练/预测已改用 **`D:\Anaconda3\envs\gpu_env\python.exe` 直接调用** 并设 `PYTHONIOENCODING=utf-8` 规避。
+
+### Session 47
+
+- 已完成 **exp_061**：`ViT AdaFace` + **CrossEntropy** + 解冻最后 **2** 个 block（及 `norm` / `feature`），训练增强开启 **HorizontalFlip** 与 **Affine**（与 `build_train_transform` 内 ColorJitter 叠加）；`lr_head=3e-4`、`lr_backbone=1e-5`；`max_epochs=20`、`early_stopping_patience=6`，实际约 **epoch 9** 早停；`best_val_acc=1.0`。
+- 推理与 **exp_047** 对齐：`neighborhood_aware`、`top_k=15`、`base_weight=0.5`、`threshold=0.55`、**hflip TTA**。
+- 产物：
+  - 配置：`configs/experiments/exp_061_vit_adaface_haar_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta.yaml`
+  - checkpoint：`outputs/exp_061_vit_adaface_haar_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta/checkpoints/best.ckpt`
+  - submission：`data/submissions/20260402_224630_exp_061_vit_adaface_haar_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_submission.csv`
+- 与 `exp_047` submission 按 `id` 对齐：约 **2** 条测试样本类别不同（共 `1816` 条）。
+- 该 submission 已提交 Kaggle，**public score `0.92731`**，超过此前最强 **`exp_047 = 0.92621`** 约 **`0.00110`**。
+- 结论：**exp_061** 现为当前 **strongest online baseline**；说明在固定 open-set 推理协议下，**受控 CE 微调** 可带来线上增益，与此前失败的 **3-class ArcFace（exp_060）** 形成对照。

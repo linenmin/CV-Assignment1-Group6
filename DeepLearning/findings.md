@@ -1136,4 +1136,22 @@
   2. 和 `exp_043` 那种全局传播不同，这种局部 score 融合没有退化成大规模边界扩张；  
   3. 变化量级和方向都符合当前 public leaderboard 已经验证过的“小而准修正”模式。  
 - Kaggle public score 已确认是 `0.92621`，超过 `exp_032 = 0.92180`。  
-- 因而 `exp_047` 已成为当前 strongest online baseline。  
+- 因而 `exp_047` 已成为当前 strongest online baseline（后被 **exp_061** 超越，见下）。
+
+### `exp_061` ViT CE 微调 + neighborhood_aware（2026-04-02）
+
+- 实验名：`exp_061_vit_adaface_haar_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta`。
+- 训练：`CrossEntropy`；解冻最后 **2** 个 ViT block + `norm` + `feature`；`learning_rate=3e-4`、`backbone_learning_rate=1e-5`；增强含 **HorizontalFlip**、**Affine**（`transforms.build_train_transform` 中已含 ColorJitter）；`monitor=val_acc / max`；`max_epochs=20`、`early_stopping_patience=6`，实际约 **epoch 9** 早停；`best_val_acc=1.0`。
+- 推理：与 `exp_047` 相同协议——`neighborhood_aware`、`top_k=15`、`base_weight=0.5`、`threshold=0.55`、**hflip TTA**。
+- submission：`data/submissions/20260402_224630_exp_061_vit_adaface_haar_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_submission.csv`。
+- 与 `exp_047` submission 相比：约 **2 / 1816** 条测试样本类别不同。
+- Kaggle public score：**`0.92731`**，超过 `exp_047 = 0.92621` 约 **`0.00110`**。
+- **结论**：`exp_061` 现为 **strongest online baseline**。说明在固定推理锚点下，**受控 CrossEntropy 微调** 能改善 embedding，与 **exp_060**（3-class ArcFace、提交与 frozen 线一致）形成负面对照。
+
+### `exp_048` / neighborhood 参数网格（2026-04-02）
+
+- 已运行 `scripts/sweep_neighborhood_aware.py`（`gpu_env`），在固定 `exp_047` 协议（`threshold=0.55`、TTA、train+val prototype）下扫描 `top_k ∈ {5,10,15,20,30}` 与 `base_weight ∈ {0.3,0.4,0.5,0.6,0.7}`。
+- **判断标准应以 baseline `submission.csv` 为准**：候选预测必须与 baseline **按 `id` merge** 后再统计 `0->1`、`2->0` 等迁移；不可假设 test DataLoader 行序与 submission 排序一致。
+- **选参不应以小验证集为主排序**（与作业数据规模一致）；脚本已改为先最小化 submission 上的 `(0->1+0->2)`，再最小化总变化数，再贴近 `exp_047` 超参。自动 winner 为 **`(top_k=15, base_weight=0.5)`**，与 `exp_047` 一致。
+- **没有任何组合的验证集准确率高于 `0.9375`**（旁注）；降低 `base_weight` 在多个 `top_k` 上仍出现大规模 `0 -> 1/2`，与历史负例一致。
+- 与 `exp_047` baseline **预测完全一致** 的参数仍构成一片 plateau；保守外推候选 `top_k=5, base_weight=0.6`（相对 `047` 仅 1 张 `2->0`）已提交 Kaggle：**public score `0.92511`**，低于 `exp_047 = 0.92621`。该张 `2->0` 在 public 上为错误收紧，小验证集无法预见。后续 **exp_061** 已以 **`0.92731`** 成为新的最强线上基线；此组邻域超参扫描结论仍适用于「仅 frozen checkpoint」语境，不再单独推进 `exp_048` 式保守外推。

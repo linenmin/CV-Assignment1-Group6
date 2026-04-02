@@ -42,3 +42,6 @@ reports/tables/
 
 # Temporary analysis artifacts
 _cv_ga1_extracted.txt
+
+# Nested upstream clone (use submodule or manual clone; not tracked as embedded repo)
+third_party/LVFace/

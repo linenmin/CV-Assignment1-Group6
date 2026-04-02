@@ -23,11 +23,13 @@ class FaceDataModule(L.LightningDataModule):
         use_affine: bool = False,
         use_degradation_pack: bool = False,
         normalization: str = "imagenet",
+        use_full_train: bool = False,
     ) -> None:
         super().__init__()
         self.train_csv = Path(train_csv)
         self.val_csv = Path(val_csv)
         self.test_csv = Path(test_csv)
+        self.use_full_train = use_full_train
         self.image_size = image_size
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -41,8 +43,16 @@ class FaceDataModule(L.LightningDataModule):
         self.val_df = pd.read_csv(self.val_csv)
         self.test_df = pd.read_csv(self.test_csv)
 
+        train_frame = self.train_df
+        if self.use_full_train:
+            train_frame = (
+                pd.concat([self.train_df, self.val_df], ignore_index=True)
+                .sort_values("id", kind="mergesort")
+                .reset_index(drop=True)
+            )
+
         self.train_dataset = FaceDataset(
-            self.train_df,
+            train_frame,
             build_train_transform(
                 self.image_size,
                 use_horizontal_flip=self.use_horizontal_flip,

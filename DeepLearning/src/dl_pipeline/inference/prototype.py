@@ -4,7 +4,7 @@ from itertools import product
 
 import torch
 import torch.nn.functional as F
-from sklearn.cluster import SpectralClustering
+from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.decomposition import PCA
 from sklearn.model_selection import StratifiedKFold
 
@@ -487,6 +487,209 @@ def neighborhood_aware_predictions(
     return predictions, base_scores, neighbor_mean_scores, final_scores
 
 
+def compute_subcenter_prototypes(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    prototype_labels: list[int],
+    k_subcenters: int,
+    random_state: int = 42,
+) -> dict[int, torch.Tensor]:
+    """Per-class KMeans on L2-normalized embeddings; each class has K_eff <= k_subcenters centers (L2-normalized rows)."""
+    if k_subcenters < 1:
+        raise ValueError("k_subcenters 至少为 1。")
+    if not prototype_labels:
+        raise ValueError("prototype_labels 不能为空。")
+
+    normalized_embeddings = _normalize_embeddings(embeddings)
+    subcenters: dict[int, torch.Tensor] = {}
+    for label in prototype_labels:
+        class_mask = labels == label
+        class_emb = normalized_embeddings[class_mask]
+        if class_emb.numel() == 0:
+            raise ValueError(f"标签 {label} 没有可用于构建 subcenter 的样本。")
+        n = class_emb.shape[0]
+        k_eff = min(k_subcenters, n)
+        if k_eff == 1:
+            center = class_emb.mean(dim=0, keepdim=True)
+            subcenters[label] = F.normalize(center, p=2, dim=1)
+        else:
+            kmeans = KMeans(
+                n_clusters=k_eff,
+                random_state=random_state,
+                n_init=10,
+            )
+            kmeans.fit(class_emb.detach().cpu().numpy())
+            centers = torch.as_tensor(
+                kmeans.cluster_centers_,
+                dtype=class_emb.dtype,
+                device=class_emb.device,
+            )
+            subcenters[label] = _normalize_embeddings(centers)
+    return subcenters
+
+
+def _compute_best_scores_subcenters(
+    query_embeddings: torch.Tensor,
+    subcenter_prototypes: dict[int, torch.Tensor],
+    prototype_labels: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not prototype_labels:
+        raise ValueError("prototype_labels 不能为空。")
+
+    normalized_queries = _normalize_embeddings(query_embeddings)
+    scores_per_class = []
+    for label in prototype_labels:
+        centers = subcenter_prototypes[label]
+        sim = normalized_queries @ centers.T
+        max_sim, _ = sim.max(dim=1)
+        scores_per_class.append(max_sim)
+    score_matrix = torch.stack(scores_per_class, dim=1)
+    best_scores, best_indices = score_matrix.max(dim=1)
+    predicted_labels = torch.tensor(
+        [prototype_labels[index] for index in best_indices.tolist()],
+        device=query_embeddings.device,
+        dtype=torch.long,
+    )
+    return predicted_labels, best_scores
+
+
+def neighborhood_aware_subcenter_predictions(
+    query_embeddings: torch.Tensor,
+    subcenter_prototypes: dict[int, torch.Tensor],
+    prototype_labels: list[int],
+    other_label: int,
+    threshold: float,
+    top_k: int,
+    base_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """与 neighborhood_aware_predictions 相同，但 prototype 为每类多子中心（取 max similarity）。"""
+    if top_k < 1:
+        raise ValueError("top_k 至少为 1。")
+    if not (0.0 <= base_weight <= 1.0):
+        raise ValueError("base_weight 必须位于 [0, 1] 区间。")
+
+    predicted_labels, base_scores = _compute_best_scores_subcenters(
+        query_embeddings,
+        subcenter_prototypes,
+        prototype_labels,
+    )
+
+    normalized_queries = _normalize_embeddings(query_embeddings)
+    similarity = normalized_queries @ normalized_queries.T
+    similarity.fill_diagonal_(0.0)
+    current_top_k = min(top_k, max(1, similarity.shape[1] - 1))
+    _, top_indices = similarity.topk(current_top_k, dim=1)
+    neighbor_mean_scores = base_scores[top_indices].mean(dim=1)
+
+    final_scores = (base_weight * base_scores) + ((1.0 - base_weight) * neighbor_mean_scores)
+    predictions = predicted_labels.clone()
+    predictions[final_scores < threshold] = other_label
+    return predictions, base_scores, neighbor_mean_scores, final_scores
+
+
+def cross_model_disagreement_resolve(
+    pred_primary: torch.Tensor,
+    score_primary: torch.Tensor,
+    pred_secondary: torch.Tensor,
+    score_secondary: torch.Tensor,
+    other_label: int,
+    secondary_confirm_margin: float = 0.05,
+) -> torch.Tensor:
+    """主模型（通常为 ViT）优先；仅当主模型判 other 而次模型判目标类且次模型分数明显更高时，采纳次模型。"""
+    out = pred_primary.clone()
+    mask = (pred_primary == other_label) & (pred_secondary != other_label)
+    adopt = mask & (score_secondary > score_primary + secondary_confirm_margin)
+    out[adopt] = pred_secondary[adopt]
+    return out
+
+
+def neighborhood_score_fusion_predictions(
+    pred_primary_argmax: torch.Tensor,
+    final_score_primary: torch.Tensor,
+    final_score_secondary: torch.Tensor,
+    other_label: int,
+    alpha: float,
+    threshold: float,
+) -> torch.Tensor:
+    """对两路 neighborhood_aware 的标量 ``final_score`` 做线性融合，再按阈值做 open-set。
+
+    ``s_fused = alpha * s_primary + (1 - alpha) * s_secondary``；若 ``s_fused >= threshold`` 则保留
+    **主模型（通常为 ViT）的 argmax 类别**，否则判为 ``other_label``。
+
+    注意：``pred_primary_argmax`` 应来自 ``neighborhood_aware_predictions`` 在极低阈值下得到的类别
+    （即 prototype 上的 argmax，不经 open-set 拒识），与 ``final_score_*`` 同一次前向一致。
+    """
+    if not (0.0 <= alpha <= 1.0):
+        raise ValueError("alpha 必须位于 [0, 1] 区间。")
+    s_fused = alpha * final_score_primary + (1.0 - alpha) * final_score_secondary
+    pred = pred_primary_argmax.clone()
+    pred[s_fused < threshold] = other_label
+    return pred
+
+
+def transductive_cluster_refinement(
+    test_embeddings: torch.Tensor,
+    base_predictions: torch.Tensor,
+    final_scores: torch.Tensor,
+    top_k_connect: int,
+    sim_connect_threshold: float,
+    min_cluster_size: int,
+    weighted_vote_fraction: float,
+) -> torch.Tensor:
+    """在 test 集上按 cosine 相似度建 kNN 边，求连通分量；足够大且加权票达阈值的簇统一为多数类。"""
+    n = test_embeddings.shape[0]
+    if n < 2:
+        return base_predictions.clone()
+
+    normalized = _normalize_embeddings(test_embeddings)
+    sim = normalized @ normalized.T
+    sim.fill_diagonal_(0.0)
+    k_eff = min(top_k_connect, max(1, n - 1))
+    topk_values, topk_indices = sim.topk(k_eff, dim=1)
+
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(k_eff):
+            if topk_values[i, j] < sim_connect_threshold:
+                continue
+            jj = int(topk_indices[i, j].item())
+            if sim[i, jj] >= sim_connect_threshold:
+                union(i, jj)
+
+    clusters: dict[int, list[int]] = {}
+    for i in range(n):
+        r = find(i)
+        clusters.setdefault(r, []).append(i)
+
+    out = base_predictions.clone()
+    for members in clusters.values():
+        if len(members) < min_cluster_size:
+            continue
+        label_weights: dict[int, float] = {}
+        for idx in members:
+            lab = int(base_predictions[idx].item())
+            label_weights[lab] = label_weights.get(lab, 0.0) + float(final_scores[idx].item())
+        total_w = sum(label_weights.values())
+        if total_w <= 0:
+            continue
+        best_label = max(label_weights, key=lambda k: label_weights[k])
+        if label_weights[best_label] / total_w >= weighted_vote_fraction:
+            for idx in members:
+                out[idx] = best_label
+    return out
+
+
 def predict_open_set_with_exemplars(
     query_embeddings: torch.Tensor,
     gallery_embeddings: torch.Tensor,
@@ -860,6 +1063,39 @@ def select_best_threshold(
             best_threshold = threshold
             best_accuracy = accuracy
     return best_threshold, best_accuracy
+
+
+def select_best_neighborhood_threshold(
+    val_embeddings: torch.Tensor,
+    val_labels: torch.Tensor,
+    prototypes: dict[int, torch.Tensor],
+    other_label: int,
+    threshold_values: list[float],
+    top_k: int,
+    base_weight: float,
+) -> tuple[float, float, list[dict[str, float]]]:
+    """在验证集上遍历 ``threshold_values``，按 neighborhood_aware 最终分数选最优阈值。"""
+    if not threshold_values:
+        raise ValueError("threshold_values 不能为空。")
+
+    best_threshold = float(threshold_values[0])
+    best_accuracy = -1.0
+    details: list[dict[str, float]] = []
+    for threshold in threshold_values:
+        predictions, _, _, _ = neighborhood_aware_predictions(
+            query_embeddings=val_embeddings,
+            prototypes=prototypes,
+            other_label=other_label,
+            threshold=float(threshold),
+            top_k=top_k,
+            base_weight=base_weight,
+        )
+        accuracy = (predictions == val_labels).float().mean().item()
+        details.append({"threshold": float(threshold), "val_accuracy": float(accuracy)})
+        if accuracy > best_accuracy:
+            best_threshold = float(threshold)
+            best_accuracy = float(accuracy)
+    return best_threshold, best_accuracy, details
 
 
 def select_best_threshold_crossval(
