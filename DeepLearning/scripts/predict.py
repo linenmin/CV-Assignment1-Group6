@@ -36,6 +36,7 @@ from dl_pipeline.inference.prototype import (
     predict_open_set_with_class_thresholds,
     global_label_spread_predictions,
     neighborhood_aware_predictions,
+    neighborhood_aware_predictions_adaptive_threshold,
     neighborhood_score_fusion_predictions,
     pca_whiten_embedding_sets,
     select_best_quality_aware_params_leave_one_out,
@@ -1485,6 +1486,159 @@ def _run_neighborhood_aware_inference(config, datamodule, model, test_df, output
     return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
 
 
+def _run_adaptive_neighborhood_aware_inference(
+    config, datamodule, model, test_df, output_root: Path
+) -> list[int]:
+    """方向 C：邻居标签一致性驱动的自适应阈值；可选多轮高置信测试伪标签扩充 gallery 后重算 prototype。"""
+    inference_config = config.get("inference", {})
+    prototype_labels = inference_config.get("prototype_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
+    neighborhood_config = inference_config.get("neighborhood_aware", {})
+    top_k = int(neighborhood_config.get("top_k", 15))
+    base_weight = float(neighborhood_config.get("base_weight", 0.5))
+    adaptive_cfg = inference_config.get("adaptive_threshold", {})
+    th_min = float(adaptive_cfg.get("th_min", 0.45))
+    th_max = float(adaptive_cfg.get("th_max", 0.65))
+    pseudo_cfg = inference_config.get("pseudo_label_refinement", {})
+    pseudo_enabled = bool(pseudo_cfg.get("enabled", False))
+    min_final_score = float(pseudo_cfg.get("min_final_score", 0.72))
+    max_rounds = int(pseudo_cfg.get("max_rounds", 1))
+    if max_rounds < 1:
+        raise ValueError("pseudo_label_refinement.max_rounds 至少为 1。")
+    rounds = max_rounds if pseudo_enabled else 1
+
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model = model.to(device)
+
+    train_embeddings, train_labels = _collect_embeddings(
+        model,
+        datamodule.train_dataloader(),
+        device,
+        use_horizontal_flip_tta=use_horizontal_flip_tta,
+    )
+    val_embeddings, val_labels = _collect_embeddings(
+        model,
+        datamodule.val_dataloader(),
+        device,
+        use_horizontal_flip_tta=use_horizontal_flip_tta,
+    )
+    test_embeddings, test_ids = _collect_embeddings(
+        model,
+        datamodule.predict_dataloader(),
+        device,
+        use_horizontal_flip_tta=use_horizontal_flip_tta,
+    )
+
+    prototypes_train_only = compute_class_prototypes(
+        train_embeddings,
+        train_labels,
+        prototype_labels=prototype_labels,
+    )
+    val_predictions, val_base_scores, val_neighbor_scores, val_final_scores, val_eff_th = (
+        neighborhood_aware_predictions_adaptive_threshold(
+            query_embeddings=val_embeddings,
+            prototypes=prototypes_train_only,
+            other_label=other_label,
+            top_k=top_k,
+            base_weight=base_weight,
+            th_min=th_min,
+            th_max=th_max,
+        )
+    )
+    val_accuracy = (val_predictions == val_labels).float().mean().item()
+
+    all_gallery_embeddings, all_gallery_labels = combine_embedding_sets(
+        [
+            (train_embeddings, train_labels),
+            (val_embeddings, val_labels),
+        ]
+    )
+    gallery_emb = all_gallery_embeddings
+    gallery_labels = all_gallery_labels
+
+    test_predictions: torch.Tensor | None = None
+    test_base_scores: torch.Tensor | None = None
+    test_neighbor_scores: torch.Tensor | None = None
+    test_final_scores: torch.Tensor | None = None
+    test_eff_th: torch.Tensor | None = None
+    pseudo_round_counts: list[int] = []
+    test_forward_passes = 0
+
+    for round_idx in range(rounds):
+        final_prototypes = compute_class_prototypes(
+            gallery_emb,
+            gallery_labels,
+            prototype_labels=prototype_labels,
+        )
+        test_predictions, test_base_scores, test_neighbor_scores, test_final_scores, test_eff_th = (
+            neighborhood_aware_predictions_adaptive_threshold(
+                query_embeddings=test_embeddings,
+                prototypes=final_prototypes,
+                other_label=other_label,
+                top_k=top_k,
+                base_weight=base_weight,
+                th_min=th_min,
+                th_max=th_max,
+            )
+        )
+        test_forward_passes += 1
+        if round_idx == rounds - 1 or not pseudo_enabled:
+            break
+        pseudo_mask = (test_predictions != other_label) & (test_final_scores >= min_final_score)
+        n_pseudo = int(pseudo_mask.sum().item())
+        pseudo_round_counts.append(n_pseudo)
+        if n_pseudo == 0:
+            break
+        gallery_emb = torch.cat([gallery_emb, test_embeddings[pseudo_mask]], dim=0)
+        gallery_labels = torch.cat([gallery_labels, test_predictions[pseudo_mask]], dim=0)
+
+    assert test_predictions is not None and test_eff_th is not None
+
+    metrics = {
+        "mode": "adaptive_neighborhood_aware",
+        "prototype_labels": prototype_labels,
+        "other_label": other_label,
+        "tta_horizontal_flip": use_horizontal_flip_tta,
+        "val_accuracy": float(val_accuracy),
+        "adaptive_threshold": {
+            "th_min": th_min,
+            "th_max": th_max,
+            "mean_val_effective_threshold": float(val_eff_th.mean().item()),
+            "mean_test_effective_threshold": float(test_eff_th.mean().item()),
+        },
+        "neighborhood_aware": {
+            "top_k": top_k,
+            "base_weight": base_weight,
+            "neighbor_weight": float(1.0 - base_weight),
+        },
+        "pseudo_label_refinement": {
+            "enabled": pseudo_enabled,
+            "min_final_score": min_final_score,
+            "max_rounds": max_rounds,
+            "test_forward_passes": test_forward_passes,
+            "pseudo_counts_per_round": pseudo_round_counts,
+        },
+        "mean_val_base_score": float(val_base_scores.mean().item()),
+        "mean_val_neighbor_score": float(val_neighbor_scores.mean().item()),
+        "mean_val_final_score": float(val_final_scores.mean().item()),
+        "mean_test_base_score": float(test_base_scores.mean().item()),
+        "mean_test_neighbor_score": float(test_neighbor_scores.mean().item()),
+        "mean_test_final_score": float(test_final_scores.mean().item()),
+    }
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred) for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
 def _run_transductive_neighborhood_aware_inference(
     config, datamodule, model, test_df, output_root: Path
 ) -> list[int]:
@@ -2251,6 +2405,10 @@ def main() -> None:
         ordered_predictions = _run_pca_whitened_prototype_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "neighborhood_aware":
         ordered_predictions = _run_neighborhood_aware_inference(config, datamodule, model, test_df, output_root)
+    elif inference_mode == "adaptive_neighborhood_aware":
+        ordered_predictions = _run_adaptive_neighborhood_aware_inference(
+            config, datamodule, model, test_df, output_root
+        )
     elif inference_mode == "transductive_neighborhood_aware":
         ordered_predictions = _run_transductive_neighborhood_aware_inference(
             config, datamodule, model, test_df, output_root

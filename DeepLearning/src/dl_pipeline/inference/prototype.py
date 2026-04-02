@@ -487,6 +487,52 @@ def neighborhood_aware_predictions(
     return predictions, base_scores, neighbor_mean_scores, final_scores
 
 
+def neighborhood_aware_predictions_adaptive_threshold(
+    query_embeddings: torch.Tensor,
+    prototypes: dict[int, torch.Tensor],
+    other_label: int,
+    top_k: int,
+    base_weight: float,
+    th_min: float,
+    th_max: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """与 ``neighborhood_aware_predictions`` 相同的打分，但拒识阈值按邻居标签一致性在 ``[th_min, th_max]`` 内逐样本变化。
+
+    对第 ``i`` 个 query，取其 top-k 近邻（在 query 集合内、按 embedding 余弦相似度），
+    统计邻居的 prototype argmax 标签与当前 query 的 argmax 标签一致的比例 ``agree_frac``，
+    并设 ``effective_th[i] = th_max - (th_max - th_min) * agree_frac``（邻居越一致，阈值越低、越易接受）。
+
+    返回的第五个张量为 ``effective_threshold``，形状与 query 数相同。
+    """
+    if top_k < 1:
+        raise ValueError("top_k 至少为 1。")
+    if not (0.0 <= base_weight <= 1.0):
+        raise ValueError("base_weight 必须位于 [0, 1] 区间。")
+    if not (0.0 <= th_min <= 1.0 and 0.0 <= th_max <= 1.0):
+        raise ValueError("th_min、th_max 必须位于 [0, 1] 区间。")
+    if th_min > th_max:
+        raise ValueError("th_min 不能大于 th_max。")
+
+    predicted_labels, base_scores = _compute_best_scores(query_embeddings, prototypes)
+
+    normalized_queries = _normalize_embeddings(query_embeddings)
+    similarity = normalized_queries @ normalized_queries.T
+    similarity.fill_diagonal_(0.0)
+    current_top_k = min(top_k, max(1, similarity.shape[1] - 1))
+    _, top_indices = similarity.topk(current_top_k, dim=1)
+    neighbor_mean_scores = base_scores[top_indices].mean(dim=1)
+
+    final_scores = (base_weight * base_scores) + ((1.0 - base_weight) * neighbor_mean_scores)
+
+    neighbor_argmax_labels = predicted_labels[top_indices]
+    agree_frac = (neighbor_argmax_labels == predicted_labels.unsqueeze(1)).float().mean(dim=1)
+    effective_threshold = th_max - (th_max - th_min) * agree_frac
+
+    predictions = predicted_labels.clone()
+    predictions[final_scores < effective_threshold] = other_label
+    return predictions, base_scores, neighbor_mean_scores, final_scores, effective_threshold
+
+
 def compute_subcenter_prototypes(
     embeddings: torch.Tensor,
     labels: torch.Tensor,

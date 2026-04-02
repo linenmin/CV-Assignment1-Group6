@@ -1148,6 +1148,22 @@
 - Kaggle public score：**`0.92731`**，超过 `exp_047 = 0.92621` 约 **`0.00110`**。
 - **结论**：`exp_061` 现为 **strongest online baseline**。说明在固定推理锚点下，**受控 CrossEntropy 微调** 能改善 embedding，与 **exp_060**（3-class ArcFace、提交与 frozen 线一致）形成负面对照。
 
+### 方向 C：`adaptive_neighborhood_aware`（2026-04-02）
+
+- **代码**：`neighborhood_aware_predictions_adaptive_threshold`（`src/dl_pipeline/inference/prototype.py`）在原有 `final_score` 上，用 query 的 top-k 近邻与当前 argmax 标签的**一致比例** `agree_frac`，设逐样本阈值 `effective_th = th_max - (th_max - th_min) * agree_frac`（邻居越一致，阈值越低）。
+- **编排**：`scripts/predict.py` 新增 `inference.mode: adaptive_neighborhood_aware`；验证集仍用 **train-only prototype** 算 `val_accuracy`；测试集 gallery 起始为 **train+val**，可选 `pseudo_label_refinement`：将 `final_score >= min_final_score` 且非 `other` 的测试样本并入 gallery，重算 prototype 后再跑一轮（可多轮至 `max_rounds`）。
+- **配置示例**：`configs/experiments/exp_062_vit061_adaptive_neighborhood_pseudo2_hfliptta.yaml`（权重 `checkpoint_source_experiment: exp_061_...`；默认 `th_min=0.45`、`th_max=0.65`；伪标签一轮 `max_rounds: 2`）。
+- **运行**：`python scripts/predict.py --config configs/experiments/exp_062_vit061_adaptive_neighborhood_pseudo2_hfliptta.yaml`（需本机存在 `exp_061` 的 `metrics.json` / checkpoint）。
+- **单测**：`tests/test_prototype_inference.py::test_adaptive_threshold_matches_fixed_when_th_min_equals_th_max`（`th_min == th_max` 时与固定阈值行为一致）；若本地 NumPy/SciPy 与 sklearn 不兼容，需在可用环境中重跑 pytest。
+
+### `exp_062` 当前结果（Kaggle public）
+
+- 实验名：`exp_062_vit061_adaptive_neighborhood_pseudo2_hfliptta`；复用 **exp_061** checkpoint；推理为 `adaptive_neighborhood_aware`（`th_min=0.45`、`th_max=0.65`）+ 伪标签 refinement（`min_final_score=0.72`、`max_rounds=2`）。
+- submission：`data/submissions/20260402_231317_exp_062_vit061_adaptive_neighborhood_pseudo2_hfliptta_submission.csv`。
+- 与 **exp_061** submission 按 `id` 对齐：共 **6 / 1816** 条不同，全部为 **`0 -> 1`（4 条）或 `0 -> 2`（2 条）**；预测分布由 `{0:1072, 1:357, 2:387}` 变为 `{0:1066, 1:361, 2:389}`。
+- Kaggle public score：**`0.92731`**，与 **exp_061** 相同；说明在当前线上划分下，自适应阈值 + 伪标签未带来额外 public 增益。
+- **结论**：线上最强仍为 **exp_061**（与 exp_062 并列分数）；方向 C 可作为方法记录，提交优先级不高于 exp_061。
+
 ### `exp_048` / neighborhood 参数网格（2026-04-02）
 
 - 已运行 `scripts/sweep_neighborhood_aware.py`（`gpu_env`），在固定 `exp_047` 协议（`threshold=0.55`、TTA、train+val prototype）下扫描 `top_k ∈ {5,10,15,20,30}` 与 `base_weight ∈ {0.3,0.4,0.5,0.6,0.7}`。

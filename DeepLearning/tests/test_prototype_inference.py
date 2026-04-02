@@ -17,6 +17,7 @@ from dl_pipeline.inference.prototype import (
     fuse_similarity_matrices,
     global_label_spread_predictions,
     neighborhood_aware_predictions,
+    neighborhood_aware_predictions_adaptive_threshold,
     pca_whiten_embedding_sets,
     predict_open_set_with_lookalikes,
     predict_open_set_with_lookalike_margin_rejection,
@@ -67,6 +68,40 @@ class PrototypeInferenceTests(unittest.TestCase):
         self.assertLess(base_scores[0].item(), 0.75)
         self.assertGreater(neighbor_scores[0].item(), 0.75)
         self.assertGreaterEqual(final_scores[0].item(), 0.75)
+
+    def test_adaptive_threshold_matches_fixed_when_th_min_equals_th_max(self):
+        prototypes = {
+            1: torch.tensor([1.0, 0.0]),
+            2: torch.tensor([-1.0, 0.0]),
+        }
+        query_embeddings = torch.tensor(
+            [
+                [0.60, 0.80],
+                [1.00, 0.10],
+                [1.00, -0.10],
+                [0.00, -1.00],
+            ],
+            dtype=torch.float32,
+        )
+        p_fix, _, _, _ = neighborhood_aware_predictions(
+            query_embeddings=query_embeddings,
+            prototypes=prototypes,
+            other_label=0,
+            threshold=0.55,
+            top_k=2,
+            base_weight=0.5,
+        )
+        p_ad, _, _, _, eff = neighborhood_aware_predictions_adaptive_threshold(
+            query_embeddings=query_embeddings,
+            prototypes=prototypes,
+            other_label=0,
+            top_k=2,
+            base_weight=0.5,
+            th_min=0.55,
+            th_max=0.55,
+        )
+        self.assertTrue(torch.equal(p_fix, p_ad))
+        self.assertTrue(torch.allclose(eff, torch.full_like(eff, 0.55)))
 
     def test_cross_model_disagreement_resolve_adopts_secondary_when_primary_other(self):
         pred_v = torch.tensor([0, 1, 0, 2], dtype=torch.long)

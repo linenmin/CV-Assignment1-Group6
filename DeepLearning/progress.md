@@ -1039,3 +1039,14 @@
 - 与 `exp_047` submission 按 `id` 对齐：约 **2** 条测试样本类别不同（共 `1816` 条）。
 - 该 submission 已提交 Kaggle，**public score `0.92731`**，超过此前最强 **`exp_047 = 0.92621`** 约 **`0.00110`**。
 - 结论：**exp_061** 现为当前 **strongest online baseline**；说明在固定 open-set 推理协议下，**受控 CE 微调** 可带来线上增益，与此前失败的 **3-class ArcFace（exp_060）** 形成对照。
+
+### Session 48
+
+- 已完成 **exp_062**：复用 **exp_061** 权重；推理为 **adaptive_neighborhood_aware**（`th_min=0.45`、`th_max=0.65`）+ **pseudo_label_refinement**（`min_final_score=0.72`、`max_rounds=2`）；TTA 仍为 hflip。
+- 产物：
+  - 配置：`configs/experiments/exp_062_vit061_adaptive_neighborhood_pseudo2_hfliptta.yaml`
+  - submission：`data/submissions/20260402_231317_exp_062_vit061_adaptive_neighborhood_pseudo2_hfliptta_submission.csv`
+  - 指标：`outputs/exp_062_vit061_adaptive_neighborhood_pseudo2_hfliptta/prototype_metrics.json`
+- 与 **exp_061** submission 按 `id` 对齐：**6** 条不同（均为 `0 -> 1` 或 `0 -> 2`）。
+- 该 submission 已提交 Kaggle，**public score `0.92731`**，与 **exp_061** 相同。
+- 结论：方向 C 未提升 public 分数；**strongest online baseline** 仍为 **exp_061**（与 exp_062 分数并列）。
