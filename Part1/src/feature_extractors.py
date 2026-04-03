@@ -3,7 +3,6 @@ feature_extractors.py
 ---------------------
 Feature extraction classes and functions:
   - IdentityFeatureExtractor   (pass-through baseline)
-  - HOGFeatureExtractor        (stub / for extension)
   - PCAFeatureExtractor        (Eigenfaces via sklearn PCA)
   - extract_hog()              (OpenCV HOG, 1764-dim)
   - extract_lbp()              (vectorised LBP histogram, 256-dim)
@@ -25,18 +24,6 @@ class IdentityFeatureExtractor:
 
     def __call__(self, X):
         return self.transform(X)
-
-
-# ── HOG stub (for extension) ──────────────────────────────────────────────────
-
-class HOGFeatureExtractor(IdentityFeatureExtractor):
-    """Placeholder HOG extractor — use the module-level extract_hog() instead."""
-
-    def __init__(self, **params):
-        self.params = params
-
-    def transform(self, X):
-        raise NotImplementedError("Use extract_hog() from this module.")
 
 
 # ── PCA / Eigenfaces ──────────────────────────────────────────────────────────
