@@ -1,0 +1,43 @@
+experiment_name: exp_066_transductive_label_spread
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+  num_workers: 0
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 2
+  unfreeze_cvlface_norm: true
+  unfreeze_cvlface_feature: true
+  dropout: 0.2
+train:
+  batch_size: 8
+  max_epochs: 20
+  learning_rate: 0.0003
+  backbone_learning_rate: 1.0e-05
+  weight_decay: 0.0001
+  monitor_metric: val_acc
+  monitor_mode: max
+  early_stopping_patience: 6
+  scheduler: cosine
+augmentation:
+  use_horizontal_flip: true
+  use_affine: true
+  use_degradation_pack: false
+inference:
+  mode: global_label_spread_predictions
+  alpha: 0.1
+  n_neighbors: 15
+  kernel: knn
+  tta_horizontal_flip: true
+  target_labels:
+  - 1
+  - 2
+  other_label: 0

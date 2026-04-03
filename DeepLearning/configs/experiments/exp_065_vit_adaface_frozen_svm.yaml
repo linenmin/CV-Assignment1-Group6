@@ -1,0 +1,54 @@
+experiment_name: exp_065_vit_adaface_frozen_svm
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+  num_workers: 0
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 2
+  unfreeze_cvlface_norm: true
+  unfreeze_cvlface_feature: true
+  dropout: 0.2
+train:
+  batch_size: 8
+  max_epochs: 20
+  learning_rate: 0.0003
+  backbone_learning_rate: 1.0e-05
+  weight_decay: 0.0001
+  monitor_metric: val_acc
+  monitor_mode: max
+  early_stopping_patience: 6
+  scheduler: cosine
+augmentation:
+  use_horizontal_flip: true
+  use_affine: true
+  use_degradation_pack: false
+inference:
+  mode: svm_open_set
+  prototype_labels:
+  - 1
+  - 2
+  other_label: 0
+  threshold: 0.55
+  tta_horizontal_flip: true
+  prob_threshold: 0.55
+  c_values:
+  - 0.1
+  - 1.0
+  - 10.0
+  - 50.0
+  - 100.0
+  gamma_values:
+  - scale
+  - auto
+  - 0.1
+  - 0.01
+  - 0.001

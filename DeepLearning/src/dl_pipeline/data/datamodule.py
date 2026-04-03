@@ -24,6 +24,8 @@ class FaceDataModule(L.LightningDataModule):
         use_degradation_pack: bool = False,
         normalization: str = "imagenet",
         use_full_train: bool = False,
+        use_triplet_dataset: bool = False,
+        lookalike_csv_path: str | Path | None = None,
     ) -> None:
         super().__init__()
         self.train_csv = Path(train_csv)
@@ -37,6 +39,8 @@ class FaceDataModule(L.LightningDataModule):
         self.use_affine = use_affine
         self.use_degradation_pack = use_degradation_pack
         self.normalization = normalization
+        self.use_triplet_dataset = use_triplet_dataset
+        self.lookalike_csv_path = lookalike_csv_path
 
     def setup(self, stage: str | None = None) -> None:
         self.train_df = pd.read_csv(self.train_csv)
@@ -51,17 +55,32 @@ class FaceDataModule(L.LightningDataModule):
                 .reset_index(drop=True)
             )
 
-        self.train_dataset = FaceDataset(
-            train_frame,
-            build_train_transform(
-                self.image_size,
-                use_horizontal_flip=self.use_horizontal_flip,
-                use_affine=self.use_affine,
-                use_degradation_pack=self.use_degradation_pack,
-                normalization=self.normalization,
-            ),
-            True,
-        )
+        if self.use_triplet_dataset:
+            from dl_pipeline.data.dataset import TripletFaceDataset
+            self.train_dataset = TripletFaceDataset(
+                train_frame,
+                build_train_transform(
+                    self.image_size,
+                    use_horizontal_flip=self.use_horizontal_flip,
+                    use_affine=self.use_affine,
+                    use_degradation_pack=self.use_degradation_pack,
+                    normalization=self.normalization,
+                ),
+                lookalike_csv_path=self.lookalike_csv_path,
+            )
+        else:
+            self.train_dataset = FaceDataset(
+                train_frame,
+                build_train_transform(
+                    self.image_size,
+                    use_horizontal_flip=self.use_horizontal_flip,
+                    use_affine=self.use_affine,
+                    use_degradation_pack=self.use_degradation_pack,
+                    normalization=self.normalization,
+                ),
+                True,
+            )
+
         self.val_dataset = FaceDataset(
             self.val_df,
             build_eval_transform(self.image_size, normalization=self.normalization),

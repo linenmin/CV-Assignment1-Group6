@@ -59,7 +59,9 @@ class FaceClassifierModule(L.LightningModule):
             int(label): index for index, label in enumerate(self.loss_target_labels)
         }
 
-        if self.loss_name == "arcface":
+        if self.loss_name == "triplet":
+            self.criterion = nn.TripletMarginLoss(margin=0.5, p=2)
+        elif self.loss_name == "arcface":
             if len(self.loss_target_labels) < 2:
                 raise ValueError("ArcFace 模式至少需要两个 target labels。")
             self.arcface_head = ArcFaceHead(
@@ -153,6 +155,24 @@ class FaceClassifierModule(L.LightningModule):
         return loss, preds, target_labels, int(target_labels.shape[0])
 
     def training_step(self, batch, batch_idx):
+        if self.loss_name == "triplet":
+            anchors, positives, negatives, labels = batch
+            anchor_feats = torch.nn.functional.normalize(self.extract_features(anchors), p=2, dim=1)
+            pos_feats = torch.nn.functional.normalize(self.extract_features(positives), p=2, dim=1)
+            neg_feats = torch.nn.functional.normalize(self.extract_features(negatives), p=2, dim=1)
+            
+            loss = self.criterion(anchor_feats, pos_feats, neg_feats)
+            batch_size = labels.shape[0]
+            self.log(
+                "train_loss",
+                loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                batch_size=max(batch_size, 1),
+            )
+            return loss
+
         images, labels = batch
         loss, _, _, batch_size = self._compute_loss_and_predictions(images, labels)
         self.log(
@@ -166,6 +186,10 @@ class FaceClassifierModule(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
+        if self.loss_name == "triplet":
+            # Just return empty, validation metrics don't apply to pure triplet backbone training
+            return
+
         images, labels = batch
         loss, preds, metric_labels, batch_size = self._compute_loss_and_predictions(images, labels)
         if self.loss_name == "arcface":

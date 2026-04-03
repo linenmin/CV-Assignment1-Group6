@@ -49,6 +49,7 @@ from dl_pipeline.inference.prototype import (
     select_best_neighborhood_threshold,
     spectral_cluster_with_gallery_label_matching,
 )
+from dl_pipeline.inference.svm import train_and_predict_svm
 from dl_pipeline.inference.submission import build_submission_dataframe, save_submission_dataframe
 from dl_pipeline.inference.tta import extract_tta_features
 from dl_pipeline.training.progress import AsciiTQDMProgressBar
@@ -2312,6 +2313,63 @@ def _run_transductive_subcenter_cascade_inference(
     return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
 
 
+def _run_svm_open_set_inference(config, datamodule, model, test_df, output_root: Path):
+    inference_config = config.get("inference", {})
+    target_labels = inference_config.get("target_labels", [1, 2])
+    other_label = inference_config.get("other_label", 0)
+    c_values = inference_config.get("c_values", [0.1, 1.0, 10.0, 50.0, 100.0, 200.0])
+    gamma_values = inference_config.get("gamma_values", ["scale", "auto", 0.1, 0.01, 0.001])
+    prob_threshold = float(inference_config.get("prob_threshold", 0.5))
+    use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    if model is not None:
+        model = model.to(device)
+
+    train_embeddings, train_labels = _collect_embeddings(model, datamodule.train_dataloader(), device, use_horizontal_flip_tta)
+    val_embeddings, val_labels = _collect_embeddings(model, datamodule.val_dataloader(), device, use_horizontal_flip_tta)
+    test_embeddings, test_ids = _collect_embeddings(model, datamodule.predict_dataloader(), device, use_horizontal_flip_tta)
+    
+    labeled_embeddings, labeled_labels = combine_embedding_sets(
+        [
+            (train_embeddings, train_labels),
+            (val_embeddings, val_labels),
+        ]
+    )
+
+    test_predictions, metrics = train_and_predict_svm(
+        gallery_embeddings=labeled_embeddings,
+        gallery_labels=labeled_labels,
+        query_embeddings=test_embeddings,
+        c_values=c_values,
+        gamma_values=gamma_values,
+        target_labels=target_labels,
+        other_label=other_label,
+        prob_threshold=prob_threshold
+    )
+
+    svm_metrics = {
+        "mode": "svm_open_set",
+        "target_labels": target_labels,
+        "other_label": other_label,
+        "gallery_source": "all_labeled",
+        "tta_horizontal_flip": use_horizontal_flip_tta,
+        **metrics
+    }
+    
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "prototype_metrics.json").write_text(
+        json.dumps(svm_metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred)
+        for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="加载最佳模型并生成 submission.csv。")
     parser.add_argument("--config", required=True)
@@ -2439,6 +2497,8 @@ def main() -> None:
         ordered_predictions = _run_lookalike_prototype_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "lookalike_margin_rejection":
         ordered_predictions = _run_lookalike_margin_inference(config, datamodule, model, test_df, output_root)
+    elif inference_mode == "svm_open_set":
+        ordered_predictions = _run_svm_open_set_inference(config, datamodule, model, test_df, output_root)
     else:
         outputs = trainer.predict(model, datamodule=datamodule)
 
