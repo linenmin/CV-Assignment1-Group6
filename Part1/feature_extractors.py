@@ -44,6 +44,8 @@ class HOGFeatureExtractor(IdentityFeatureExtractor):
 class PCAFeatureExtractor(IdentityFeatureExtractor):
     """Eigenface-based dimensionality reduction via PCA.
 
+   
+
     Usage
     -----
     extractor = PCAFeatureExtractor(n_components=50)
@@ -137,3 +139,37 @@ def extract_lbp(X, n_bins=256):
 def extract_combined(X):
     """(N, H, W, 3) RGB -> (N, 2020) concatenated HOG + LBP features."""
     return np.hstack([extract_hog(X), extract_lbp(X)])
+
+
+
+
+
+"""
+ Technical Notes
+    ---------------
+    1. 2D Matrix Conversion: We converted the 4D image tensor into a 2D matrix by 
+       flattening each 100 x 100 x 3 image into a 1D vector of length 30,000. 
+       Stacking the N=80 training samples results in a 80 x 30,000 data matrix.
+
+    2. Exploiting Dimensionality & SVD vs. Eigenvalue Decomposition: A standard 
+       eigenvalue decomposition would require computing a 30,000 x 30,000 
+       covariance matrix, which is computationally prohibitive. Because our 
+       number of samples is much smaller than the number of features (N << D), 
+       we exploited this dimensionality by using Singular Value Decomposition (SVD) 
+       provided by sklearn. SVD efficiently computes the principal components 
+       by implicitly operating on an 80 x 80 matrix, vastly improving effectiveness.
+
+    3. Mean Subtraction: Yes, mean subtraction is strictly required and applied 
+       internally during fit(). If the data is not mean-centered, the first 
+       principal component would simply point toward the mean of the dataset 
+       rather than capturing the direction of maximum variance.
+
+    4. Pre-processing Steps: Before PCA, three critical pre-processing steps 
+       were required:
+       (a) HAAR Cascade face extraction to remove background noise, ensuring 
+           PCA focuses on facial variance.
+       (b) Center-cropping fallback for failed detections to avoid NaN values 
+           that would break SVD.
+       (c) Resizing all images to 100 x 100 to ensure every flattened vector 
+           has the exact same dimension (30,000).
+"""
