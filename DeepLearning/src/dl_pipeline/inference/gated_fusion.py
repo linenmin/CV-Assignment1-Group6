@@ -286,3 +286,132 @@ def select_best_rescue_only_params(
             best_record = record
 
     return best_record or {}, records
+
+
+def apply_agreement_aware_rescue_only_fusion(
+    anchor_predictions: np.ndarray,
+    anchor_argmax: np.ndarray,
+    anchor_scores: np.ndarray,
+    secondary_predictions: np.ndarray,
+    secondary_excess_jesse: np.ndarray,
+    secondary_excess_mila: np.ndarray,
+    other_label: int,
+    low_conf_threshold: float,
+    rescue_margin_jesse_agree: float,
+    rescue_margin_jesse_disagree: float,
+    rescue_margin_mila_agree: float,
+    rescue_margin_mila_disagree: float,
+) -> np.ndarray:
+    anchor_predictions = np.asarray(anchor_predictions, dtype=np.int64)
+    anchor_argmax = np.asarray(anchor_argmax, dtype=np.int64)
+    anchor_scores = np.asarray(anchor_scores, dtype=np.float32)
+    secondary_predictions = np.asarray(secondary_predictions, dtype=np.int64)
+    secondary_excess_jesse = np.asarray(secondary_excess_jesse, dtype=np.float32)
+    secondary_excess_mila = np.asarray(secondary_excess_mila, dtype=np.float32)
+
+    n = anchor_predictions.shape[0]
+    for array in (
+        anchor_argmax,
+        anchor_scores,
+        secondary_predictions,
+        secondary_excess_jesse,
+        secondary_excess_mila,
+    ):
+        if array.shape[0] != n:
+            raise ValueError("所有输入数组长度必须一致。")
+
+    fused = anchor_predictions.copy()
+    rescue_base = (anchor_predictions == int(other_label)) & (anchor_scores < float(low_conf_threshold))
+
+    agree_jesse = rescue_base & (secondary_predictions == 1) & (anchor_argmax == 1)
+    disagree_jesse = rescue_base & (secondary_predictions == 1) & (anchor_argmax != 1)
+    agree_mila = rescue_base & (secondary_predictions == 2) & (anchor_argmax == 2)
+    disagree_mila = rescue_base & (secondary_predictions == 2) & (anchor_argmax != 2)
+
+    fused[agree_jesse & (secondary_excess_jesse >= float(rescue_margin_jesse_agree))] = 1
+    fused[disagree_jesse & (secondary_excess_jesse >= float(rescue_margin_jesse_disagree))] = 1
+    fused[agree_mila & (secondary_excess_mila >= float(rescue_margin_mila_agree))] = 2
+    fused[disagree_mila & (secondary_excess_mila >= float(rescue_margin_mila_disagree))] = 2
+    return fused
+
+
+def select_best_agreement_aware_rescue_only_params(
+    labels: np.ndarray,
+    anchor_predictions: np.ndarray,
+    anchor_argmax: np.ndarray,
+    anchor_scores: np.ndarray,
+    secondary_predictions: np.ndarray,
+    secondary_excess_jesse: np.ndarray,
+    secondary_excess_mila: np.ndarray,
+    other_label: int,
+    low_conf_threshold_values: list[float],
+    rescue_margin_jesse_agree_values: list[float],
+    rescue_margin_jesse_disagree_values: list[float],
+    rescue_margin_mila_agree_values: list[float],
+    rescue_margin_mila_disagree_values: list[float],
+) -> tuple[dict[str, float], list[dict[str, float]]]:
+    if not low_conf_threshold_values:
+        raise ValueError("low_conf_threshold_values 不能为空。")
+    if not rescue_margin_jesse_agree_values:
+        raise ValueError("rescue_margin_jesse_agree_values 不能为空。")
+    if not rescue_margin_jesse_disagree_values:
+        raise ValueError("rescue_margin_jesse_disagree_values 不能为空。")
+    if not rescue_margin_mila_agree_values:
+        raise ValueError("rescue_margin_mila_agree_values 不能为空。")
+    if not rescue_margin_mila_disagree_values:
+        raise ValueError("rescue_margin_mila_disagree_values 不能为空。")
+
+    labels = np.asarray(labels, dtype=np.int64)
+    anchor_predictions = np.asarray(anchor_predictions, dtype=np.int64)
+    records: list[dict[str, float]] = []
+    best_record: dict[str, float] | None = None
+
+    for (
+        low_conf_threshold,
+        rescue_margin_jesse_agree,
+        rescue_margin_jesse_disagree,
+        rescue_margin_mila_agree,
+        rescue_margin_mila_disagree,
+    ) in product(
+        low_conf_threshold_values,
+        rescue_margin_jesse_agree_values,
+        rescue_margin_jesse_disagree_values,
+        rescue_margin_mila_agree_values,
+        rescue_margin_mila_disagree_values,
+    ):
+        fused = apply_agreement_aware_rescue_only_fusion(
+            anchor_predictions=anchor_predictions,
+            anchor_argmax=anchor_argmax,
+            anchor_scores=anchor_scores,
+            secondary_predictions=secondary_predictions,
+            secondary_excess_jesse=secondary_excess_jesse,
+            secondary_excess_mila=secondary_excess_mila,
+            other_label=other_label,
+            low_conf_threshold=low_conf_threshold,
+            rescue_margin_jesse_agree=rescue_margin_jesse_agree,
+            rescue_margin_jesse_disagree=rescue_margin_jesse_disagree,
+            rescue_margin_mila_agree=rescue_margin_mila_agree,
+            rescue_margin_mila_disagree=rescue_margin_mila_disagree,
+        )
+        accuracy = float((fused == labels).mean())
+        num_changes = int((fused != anchor_predictions).sum())
+        record = {
+            "low_conf_threshold": float(low_conf_threshold),
+            "rescue_margin_jesse_agree": float(rescue_margin_jesse_agree),
+            "rescue_margin_jesse_disagree": float(rescue_margin_jesse_disagree),
+            "rescue_margin_mila_agree": float(rescue_margin_mila_agree),
+            "rescue_margin_mila_disagree": float(rescue_margin_mila_disagree),
+            "accuracy": accuracy,
+            "num_changes": num_changes,
+        }
+        records.append(record)
+        if best_record is None:
+            best_record = record
+            continue
+        if accuracy > float(best_record["accuracy"]):
+            best_record = record
+            continue
+        if accuracy == float(best_record["accuracy"]) and num_changes < int(best_record["num_changes"]):
+            best_record = record
+
+    return best_record or {}, records

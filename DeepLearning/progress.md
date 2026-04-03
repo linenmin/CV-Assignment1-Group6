@@ -1246,3 +1246,285 @@
 - 当前实验判断：
   - **若继续在线尝试，优先提交 `exp_084` 而不是 `exp_083`**
   - 原因不是它离线更高，而是它在**相同 LOO 最优精度**下，对 `exp_082` 的激进 rescue 做了更强收缩，更适合作为“同机制、更保守”的验证候选
+
+### Session 55
+
+- 已先完成一次代码归档：
+  - 在 `Computer Vision/assignment/Group` 仓库的 `DL` 分支提交并推送：
+    - commit: `c2c6bcf`
+    - message: `feat(backend): add dual verifier and rescue fusion experiments`
+- 随后按既定下一步实现并运行 **`exp_085_vit061_buffalol067_agreementaware_rescueonly_labeledloo`**：
+  - 新增脚本：`scripts/predict_061_067_agreement_rescue_labeledloo.py`
+  - `gated_fusion.py` 新增：
+    - `apply_agreement_aware_rescue_only_fusion`
+    - `select_best_agreement_aware_rescue_only_params`
+  - `tests/test_gated_fusion.py` 对应补充 agreement-aware 单测
+- 设计动机：
+  - 不再把 `argmax match` 当硬过滤
+  - 改为把 rescue 子集拆成：
+    - `061_argmax == 067_pred`
+    - `061_argmax != 067_pred`
+  - Jesse / Mila 各自再分 `agree` / `disagree` 两套 margin
+- 本轮验证：
+  - `conda run -n gpu_env python -m unittest tests.test_gated_fusion tests.test_prototype_inference`
+  - 结果：`42 tests` 全通过
+  - 运行主实验时，`conda run` 依旧触发 Windows 编码问题，但**实验本体已完整执行并写出产物**；错误发生在 conda 回显 stdout 阶段，不影响结果文件
+- `exp_085` 结果：
+  - submission：`data/submissions/20260403_184059_exp_085_vit061_buffalol067_agreementaware_rescueonly_labeledloo_submission.csv`
+  - metrics：`outputs/exp_085_vit061_buffalol067_agreementaware_rescueonly_labeledloo/prototype_metrics.json`
+  - 最优参数：
+    - `low_conf_threshold = 0.45`
+    - `rescue_margin_jesse_agree = 0.02`
+    - `rescue_margin_jesse_disagree = 0.06`
+    - `rescue_margin_mila_agree = 0.02`
+    - `rescue_margin_mila_disagree = 0.06`
+  - **LOO 指标**：
+    - `exp_061 = 0.9250`
+    - `exp_067 = 0.9125`
+    - `fused = 0.9625`
+  - LOO rescue 子集仅 `3` 张：
+    - agree: `2`
+    - disagree: `1`
+  - test rescue 候选共 `99` 张：
+    - agree: `54`
+    - disagree: `45`
+- 与历史候选的关系：
+  - 相对 `exp_061`：改动 `95` 张
+    - `0 -> 1`: `51`
+    - `0 -> 2`: `44`
+  - 相对 `exp_082`：只差 `4` 张
+    - 全部为 `1 -> 0`
+  - 相对 `exp_083`：也只差 `4` 张
+    - `0 -> 1`: `3`
+    - `0 -> 2`: `1`
+- 对这 `4` 张差异样本的检查结果：
+  - `exp_085` 相比 `exp_082` 撤回的 4 张，全部是 Jesse rescue
+  - 其中 `3` 张其实 `061_argmax == 1` 且 `067` 的 Jesse excess 很高，但因为 `score_061_final > 0.45`，被 `rescue-only low_conf gate` 挡住
+  - 这说明：`exp_085` 的主要变化并不是“agreement-aware 学到了新结构”，而是**在 `exp_082` 与 `exp_083` 之间做了一次更细的中间收缩**
+- 当前判断：
+  - `exp_085` **值得作为一个低风险补充候选提交一次**，因为它与当前最强 `exp_082` 只差 `4` 张，不是大偏航
+  - 但它**不值得高置信押注**；从结构上看，它更像 `082/083` 之间的 interpolation，而不是新的主突破
+  - 如果线上不超过 `0.94768`，下一步不应继续在 agreement-aware margin 上细抠，而应直接进入：
+    - `061 score-aware rescue`
+    - 或 `082 + 085` 这类更小范围的 sample-wise meta-decider
+
+### Session 56
+
+- 根据 `raw / HAAR / MTCNN` 三联图人工检查，确认当前任务的主问题已不是“检测器谁更清晰”，而是：
+  - 多人图 / 比较图里**单脸裁剪经常选错人**
+  - 典型情况包括：
+    - `class1` 与 `other` 放在一起的比较图，标签只给 `class1`
+    - 合照中目标脸不是最大脸
+    - `HAAR` 裁到背景人，`MTCNN` 裁到另一位主角
+    - 占位图 / 坏图直接进入训练集
+- 因此本轮不继续做单脸裁剪器微调，也不采用全手工裁剪；而是正式开启：
+  - **多脸候选 + 图像级 max-pool 验证器原型**
+- 新增：
+  - 配置：`configs/experiments/exp_086_buffalo_l_detect_align_multiface_dual_verifier_lookalike.yaml`
+  - 脚本：`scripts/predict_multiface_dual_verifier.py`
+  - 逻辑：`src/dl_pipeline/inference/insightface_dual_verifier.py` 新增 `aggregate_multi_face_scores`
+  - 测试：`tests/test_insightface_dual_verifier.py` 改为 `unittest`，并补充多脸聚合用例
+- 设计原则：
+  - **gallery / 阈值校准协议保持 `exp_067` 不变**
+  - 只改 probe 侧：
+    - 从原始整图 `detect_align` 提取**所有**检测到的人脸 embedding
+    - 对每张候选脸分别算 Jesse / Mila 分数
+    - 图片级别按通道取最大分，再做 dual verifier 判决
+  - 这样可以单独验证：
+    - “多人图裁错人” 是否就是当前最大瓶颈
+- 验证：
+  - `python -m unittest tests.test_insightface_dual_verifier tests.test_gated_fusion tests.test_prototype_inference`
+  - 结果：`48 tests` 全通过
+- `exp_086` 结果：
+  - submission：`data/submissions/20260403_195050_exp_086_buffalo_l_detect_align_multiface_dual_verifier_lookalike_submission.csv`
+  - metrics：`outputs/exp_086_buffalo_l_detect_align_multiface_dual_verifier_lookalike/prototype_metrics.json`
+  - **val_accuracy_multiface = 1.0000**
+  - 相比 `exp_067` 风格的 test 预测，改动 **140** 张：
+    - `0 -> 1`: `66`
+    - `0 -> 2`: `15`
+    - `1 -> 0`: `28`
+    - `2 -> 0`: `15`
+    - `2 -> 1`: `8`
+    - `1 -> 2`: `8`
+  - val 多脸检测统计：
+    - `1 face`: `12`
+    - `2 face`: `2`
+    - `3 face`: `1`
+    - `4 face`: `1`
+  - test 多脸检测统计显示多人图并不少：
+    - `1 face`: `1301`
+    - `2+ faces`: `515`
+- 当前判断：
+  - `exp_086` 是**值得提交一次**的候选，因为它不是在 `082/083/085` 那类 threshold plateau 上继续打转，而是直接改变了任务假设
+  - 即使线上未必立刻超过 `0.94768`，它也会给出更高信息量：  
+    当前瓶颈究竟是“多人图选错人”，还是“061/067 的身份边界本身还不够好”
+- 额外记录：
+  - 三联图脚本 `export_face_comparison_visualization.py` 在修 `val -> train` 映射时曾误把 `_try_load_image()` 改坏，导致整批输出显示 `missing`
+  - 根因已定位并修复；建议后续优先查看新导出的目录：
+    - `data/visualizations/face_compare/train_val_exp_001_v2`
+
+### Session 57
+
+- 用户反馈 `exp_086` Kaggle public score = **`0.97026`**，当前已进入榜单第一梯队边缘。
+- 这使得 `exp_086` 不再只是“信息量高的候选”，而是当前最强主线之一；因此下一步不继续盲推训练，而是先验证：
+  - **多脸候选 + 图片级聚合** 在 80 张 labeled 样本上是否真的工作正常
+- 新增：
+  - `scripts/export_multiface_probe_visualization.py`
+  - `src/dl_pipeline/inference/insightface_dual_verifier.py` 新增 `describe_multi_face_scores`
+  - `tests/test_insightface_dual_verifier.py` 增补 face-level 明细测试
+- 验证：
+  - `python -m unittest tests.test_insightface_dual_verifier tests.test_gated_fusion tests.test_prototype_inference`
+  - 结果：`50 tests` 全通过
+- 导出目录：
+  - `data/visualizations/multiface_probe/exp_086_train_val_exp_001`
+  - 含：
+    - `images/`：80 张 labeled 样本逐图可视化
+    - `summary.csv`：图片级预测摘要
+    - `face_details.csv`：每张脸的 bbox + Jesse/Mila 分数
+- 当前 `exp_086` 在 80 张 labeled 审计结果：
+  - **79 / 80 正确，accuracy = 0.9875**
+  - 多脸数分布：
+    - `1 face`: `57`
+    - `2 faces`: `17`
+    - `3 faces`: `5`
+    - `4 faces`: `1`
+  - 唯一错误样本：
+    - `train id=65 class=2 -> pred=0`
+    - `probe_source = crop_fallback`
+    - 对应样本正是之前人工确认的 **占位坏图 / IMAGE NOT FOUND**
+- 对用户点名的关键样本核查：
+  - `id=14`：当前 `multiface` 预测正确为 `class1`
+  - `id=34`：检测到 `3` 张脸，最终仍正确选择 `class1`
+  - `id=40`：检测到 `2` 张脸，最终正确为 `class2`
+  - `id=52`：检测到 `2` 张脸，最终正确为 `class1`
+  - `id=59`：检测到 `2` 张脸，最终保持 `other`
+  - `id=65`：坏图，仍失败
+- 当前判断进一步收敛为：
+  - 你之前怀疑“前面很多训练策略失败，其实是输入数据没处理好”这件事，现在已经拿到了很强的支持证据
+  - 现阶段最值得做的不是继续大扫训练超参，而是：
+    - 先系统化标出坏样本 / 比较陷阱图 / 多人图
+    - 再把 **自动化多脸选择** 正式接入更强主线
+
+### Session 58
+
+- 按“先单独处理坏图”这条思路，进一步检查 `exp_086` 输出，发现：
+  - test 中共有 `37` 张 `crop_fallback`
+  - 其中绝大多数并不是坏图，只是原图检测不到脸后回退到单脸 crop
+  - 真正值得单独处理的，不应是所有 fallback，而是**与带标签坏图完全重复的原图**
+- 关键发现：
+  - `train id=65 class=2` 的占位坏图，在 test 中有 **3 张完全相同的原图副本**：
+    - `id=537`
+    - `id=1071`
+    - `id=1112`
+  - 三者当前在 `exp_086` 中都被预测成 `0`
+  - 其 raw 图数组与 `train id=65` 做 SHA-1 哈希后完全一致，不是“相似”，而是字节级一致
+- 进一步检查后发现：
+  - test 中一共有 **12 张**图片与 train/val 某张标注图**原图完全一致**
+  - 其中已有 `9` 张在 `exp_086` 中预测正确
+  - 只有上述 `3` 张坏图副本预测错误
+- 因此本轮没有做宽泛的“坏图启发式”，而是实现了更干净的规则：
+  - **原图哈希与 train/val 某张带标签图片完全一致时，直接继承该标签**
+- 新增：
+  - `src/dl_pipeline/inference/exact_match_override.py`
+  - `tests/test_exact_match_override.py`
+  - `scripts/predict_086_exact_hash_override.py`
+- 验证：
+  - `python -m unittest tests.test_exact_match_override tests.test_insightface_dual_verifier tests.test_gated_fusion tests.test_prototype_inference`
+  - 结果：`52 tests` 全通过
+- 新实验：
+  - `exp_087_multiface_exact_raw_hash_override`
+  - submission：`data/submissions/20260403_202741_exp_087_multiface_exact_raw_hash_override_submission.csv`
+  - metrics：`outputs/exp_087_multiface_exact_raw_hash_override/prototype_metrics.json`
+- 本轮改动非常窄：
+  - `num_test_hash_matches_to_labeled = 12`
+  - `num_overrides_applied = 3`
+  - 全部为：
+    - `0 -> 2`: `3`
+- 当前判断：
+  - `exp_087` 是一个**非常值得提交**的低风险增量候选
+  - 它不是新的泛化假设，而是在利用一个确定事实：
+    - test 里存在与 labeled 数据完全相同的原图副本
+
+### Session 59
+
+- 开始执行“把多脸自动选人接入训练流程”的受控实验，目标是只替换输入协议，尽量不改 `exp_061` 的主体训练设定。
+- 新增规划文档：
+  - `docs/plans/2026-04-03-exp088-multiface-train-design.md`
+- 先按 TDD 补了多脸选脸逻辑：
+  - `tests/test_multiface_selection.py`
+  - `src/dl_pipeline/preprocess/multiface_selection.py`
+- 新增数据构建链路：
+  - `src/dl_pipeline/preprocess/build_multiface_selected_dataset.py`
+  - `scripts/prepare_multiface_selected_faces.py`
+  - `configs/experiments/exp_088_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta.yaml`
+- `exp_088` 的核心设定：
+  - backbone / loss / epoch / 解冻策略都保持 `exp_061`
+  - 只把输入从 `HAAR` 单脸 crop 改成“原图多脸检测后自动选中的单脸”
+  - `class1`：取 `class1` 分数最高的人脸
+  - `class2`：取 `class2` 分数最高的人脸
+  - `class0`：取最像 `class1/class2` 的 hardest negative 人脸
+  - 明确坏图 `train id=65` 直接从训练/验证 split 中剔除
+- 新数据集已成功构建：
+  - processed dir：`data/processed/exp_088_multiface_selected_faces_112`
+  - splits dir：`data/splits/exp_088_multiface_selected`
+  - 结果：
+    - train：`63`
+    - val：`16`
+    - test：`1816`
+- selection audit 统计：
+  - train：
+    - `detect_align_selected = 62`
+    - `crop_fallback = 1`（`id=9`）
+  - val：
+    - `detect_align_selected = 16`
+  - test：
+    - `detect_align_selected = 1779`
+    - `crop_fallback = 37`
+- 训练已完成：
+  - `python scripts/train.py --config configs/experiments/exp_088_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta.yaml`
+  - best checkpoint：
+    - `outputs/exp_088_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta/checkpoints/best.ckpt`
+  - `metrics.json`：
+    - `best_val_acc = 1.0`
+- 推理已完成：
+  - `python scripts/predict.py --config configs/experiments/exp_088_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta.yaml`
+  - submission：
+    - `data/submissions/20260403_222929_exp_088_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_submission.csv`
+  - CSV 表头已核对正常：`id,class`
+- 与历史 submission 对比：
+  - 相对 `exp_061` 共改动 `131` 张：
+    - `0 -> 1`: `94`
+    - `0 -> 2`: `37`
+  - 相对 `exp_087` 共改动 `28` 张：
+    - `0 -> 1`: `24`
+    - `2 -> 0`: `3`
+    - `0 -> 2`: `1`
+  - 当前预测分布：
+    - `0: 941`
+    - `1: 451`
+    - `2: 424`
+- 验证：
+  - `python -m unittest tests.test_multiface_selection tests.test_exact_match_override tests.test_insightface_dual_verifier tests.test_gated_fusion tests.test_prototype_inference`
+  - 结果：`57 tests` 全通过
+- 当前判断：
+  - `exp_088` 是第一条真正把“多脸自动选人”接进训练流程的受控重训线
+  - 它最值得提交的意义，不是离线 `1.0` 本身，而是它直接回答：
+    - 前面很多训练策略没有起飞，是否主要因为输入人脸选错了
+
+### Session 60
+
+- `exp_088` 已提交 Kaggle / leaderboard，public score：
+  - `0.98403`
+- 当前状态：
+  - 已升至 **leaderboard 第 1**
+- 这条结果的意义已经非常明确：
+  - `multiface-selected` 输入协议不只是推理层 trick
+  - 它可以直接作为训练主线的数据入口，并且带来当前最强线上收益
+- 相比此前关键线上结果：
+  - `exp_082 = 0.94768`
+  - `exp_086 = 0.97026`
+  - `exp_087 = 0.97191`
+  - `exp_088 = 0.98403`
+- 结论更新：
+  - 之前大量训练策略没有兑现，主因很可能不是 classifier 主体不行，而是长期使用了错误的人脸输入协议
+  - 当前后续实验应默认基于 `multiface-selected` 输入继续推进，而不是回退到 `HAAR` 单脸训练线

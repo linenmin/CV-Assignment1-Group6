@@ -108,6 +108,91 @@ def dual_verifier_predict(
     return 0
 
 
+def aggregate_multi_face_scores(
+    score_jesse: np.ndarray,
+    score_mila: np.ndarray,
+    theta_jesse: float,
+    theta_mila: float,
+) -> dict[str, Any]:
+    """
+    将同一张图里多张候选脸的 Jesse/Mila 分数聚合为图片级决策。
+
+    规则：
+    - Jesse 通道取所有候选脸中的最高 Jesse 分数
+    - Mila 通道取所有候选脸中的最高 Mila 分数
+    - 再将两条最佳通道分数送入 dual_verifier_predict
+    """
+    score_jesse = np.asarray(score_jesse, dtype=np.float32).reshape(-1)
+    score_mila = np.asarray(score_mila, dtype=np.float32).reshape(-1)
+    if score_jesse.shape != score_mila.shape:
+        raise ValueError("score_jesse 与 score_mila 形状必须一致。")
+    if score_jesse.size == 0:
+        return {
+            "prediction": 0,
+            "best_score_jesse": float("-inf"),
+            "best_score_mila": float("-inf"),
+            "best_excess_jesse": float("-inf"),
+            "best_excess_mila": float("-inf"),
+            "best_face_index_jesse": -1,
+            "best_face_index_mila": -1,
+        }
+
+    idx_jesse = int(np.argmax(score_jesse))
+    idx_mila = int(np.argmax(score_mila))
+    best_score_jesse = float(score_jesse[idx_jesse])
+    best_score_mila = float(score_mila[idx_mila])
+    best_excess_jesse = best_score_jesse - float(theta_jesse)
+    best_excess_mila = best_score_mila - float(theta_mila)
+    prediction = dual_verifier_predict(best_score_jesse, best_score_mila, theta_jesse, theta_mila)
+    return {
+        "prediction": int(prediction),
+        "best_score_jesse": best_score_jesse,
+        "best_score_mila": best_score_mila,
+        "best_excess_jesse": float(best_excess_jesse),
+        "best_excess_mila": float(best_excess_mila),
+        "best_face_index_jesse": idx_jesse,
+        "best_face_index_mila": idx_mila,
+    }
+
+
+def describe_multi_face_scores(
+    score_jesse: np.ndarray,
+    score_mila: np.ndarray,
+    theta_jesse: float,
+    theta_mila: float,
+) -> list[dict[str, Any]]:
+    """
+    返回每张候选脸的通道分数明细，便于导出可视化或审计表。
+    """
+    score_jesse = np.asarray(score_jesse, dtype=np.float32).reshape(-1)
+    score_mila = np.asarray(score_mila, dtype=np.float32).reshape(-1)
+    if score_jesse.shape != score_mila.shape:
+        raise ValueError("score_jesse 与 score_mila 形状必须一致。")
+    if score_jesse.size == 0:
+        return []
+
+    idx_jesse = int(np.argmax(score_jesse))
+    idx_mila = int(np.argmax(score_mila))
+    rows: list[dict[str, Any]] = []
+    for i in range(score_jesse.size):
+        sj = float(score_jesse[i])
+        sm = float(score_mila[i])
+        rows.append(
+            {
+                "face_index": int(i),
+                "score_jesse": sj,
+                "score_mila": sm,
+                "excess_jesse": sj - float(theta_jesse),
+                "excess_mila": sm - float(theta_mila),
+                "passes_jesse": bool(sj > theta_jesse),
+                "passes_mila": bool(sm > theta_mila),
+                "is_best_jesse": bool(i == idx_jesse),
+                "is_best_mila": bool(i == idx_mila),
+            }
+        )
+    return rows
+
+
 def _load_lookalike_clusters(lookalike_csv: Path) -> pd.DataFrame:
     df = pd.read_csv(lookalike_csv)
     need = {"id", "split", "cluster"}

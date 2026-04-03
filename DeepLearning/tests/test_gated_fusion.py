@@ -7,8 +7,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dl_pipeline.inference.gated_fusion import (
+    apply_agreement_aware_rescue_only_fusion,
     apply_gated_anchor_fusion,
     apply_rescue_only_fusion,
+    select_best_agreement_aware_rescue_only_params,
     select_best_rescue_only_params,
     select_best_gated_fusion_params,
     summarize_dual_verifier_scores,
@@ -135,6 +137,49 @@ class GatedFusionTests(unittest.TestCase):
         self.assertFalse(best["require_anchor_argmax_match"])
         self.assertAlmostEqual(best["accuracy"], 1.0, places=6)
         self.assertEqual(len(records), 16)
+
+    def test_apply_agreement_aware_rescue_only_fusion_uses_different_thresholds_by_agreement(self):
+        fused = apply_agreement_aware_rescue_only_fusion(
+            anchor_predictions=np.array([0, 0, 0, 0, 1], dtype=np.int64),
+            anchor_argmax=np.array([1, 2, 2, 1, 1], dtype=np.int64),
+            anchor_scores=np.array([0.20, 0.20, 0.20, 0.20, 0.70], dtype=np.float32),
+            secondary_predictions=np.array([1, 1, 2, 2, 2], dtype=np.int64),
+            secondary_excess_jesse=np.array([0.08, 0.08, -0.20, -0.20, -0.10], dtype=np.float32),
+            secondary_excess_mila=np.array([-0.20, -0.20, 0.08, 0.08, 0.12], dtype=np.float32),
+            other_label=0,
+            low_conf_threshold=0.55,
+            rescue_margin_jesse_agree=0.06,
+            rescue_margin_jesse_disagree=0.10,
+            rescue_margin_mila_agree=0.06,
+            rescue_margin_mila_disagree=0.10,
+        )
+
+        self.assertEqual(fused.tolist(), [1, 0, 2, 0, 1])
+
+    def test_select_best_agreement_aware_rescue_only_params_prefers_accuracy_then_fewer_changes(self):
+        best, records = select_best_agreement_aware_rescue_only_params(
+            labels=np.array([1, 0, 2, 0], dtype=np.int64),
+            anchor_predictions=np.array([0, 0, 0, 0], dtype=np.int64),
+            anchor_argmax=np.array([1, 2, 2, 1], dtype=np.int64),
+            anchor_scores=np.array([0.20, 0.20, 0.25, 0.25], dtype=np.float32),
+            secondary_predictions=np.array([1, 1, 2, 2], dtype=np.int64),
+            secondary_excess_jesse=np.array([0.08, 0.08, -0.20, -0.20], dtype=np.float32),
+            secondary_excess_mila=np.array([-0.20, -0.20, 0.08, 0.08], dtype=np.float32),
+            other_label=0,
+            low_conf_threshold_values=[0.40, 0.55],
+            rescue_margin_jesse_agree_values=[0.06, 0.10],
+            rescue_margin_jesse_disagree_values=[0.10, 0.14],
+            rescue_margin_mila_agree_values=[0.06, 0.10],
+            rescue_margin_mila_disagree_values=[0.10, 0.14],
+        )
+
+        self.assertEqual(best["low_conf_threshold"], 0.4)
+        self.assertEqual(best["rescue_margin_jesse_agree"], 0.06)
+        self.assertEqual(best["rescue_margin_jesse_disagree"], 0.1)
+        self.assertEqual(best["rescue_margin_mila_agree"], 0.06)
+        self.assertEqual(best["rescue_margin_mila_disagree"], 0.1)
+        self.assertAlmostEqual(best["accuracy"], 1.0, places=6)
+        self.assertEqual(len(records), 32)
 
 
 if __name__ == "__main__":
