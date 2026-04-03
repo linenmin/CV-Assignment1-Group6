@@ -95,10 +95,14 @@ def _load_model_from_checkpoint(config, checkpoint_path: str):
         unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
         unfreeze_cvlface_norm=config["model"].get("unfreeze_cvlface_norm", True),
         unfreeze_cvlface_feature=config["model"].get("unfreeze_cvlface_feature", True),
+        iresnet_finetune_mode=config["model"].get("iresnet_finetune_mode", "bn_only"),
         loss_name=loss_config.get("name", "cross_entropy"),
         loss_target_labels=loss_config.get("target_labels"),
         arcface_scale=loss_config.get("arcface_scale", 30.0),
         arcface_margin=loss_config.get("arcface_margin", 0.5),
+        cosface_scale=loss_config.get("cosface_scale", loss_config.get("arcface_scale", 30.0)),
+        cosface_margin=loss_config.get("cosface_margin", 0.35),
+        label_smoothing=float(loss_config.get("label_smoothing", 0.0)),
     )
 
 
@@ -2382,6 +2386,31 @@ def main() -> None:
     loss_config = config.get("loss", {})
 
     inference_mode = config.get("inference", {}).get("mode", "softmax")
+    if inference_mode == "insightface_dual_verifier":
+        from dl_pipeline.inference.insightface_dual_verifier import run_insightface_dual_verifier
+
+        test_df_early = pd.read_csv(splits_dir / "test.csv")
+        ordered_predictions = run_insightface_dual_verifier(config, test_df_early)
+        submission = build_submission_dataframe(test_df_early, ordered_predictions)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        submission_path = project_path(
+            config["data"]["submissions_dir"],
+            f"{timestamp}_{config['experiment_name']}_submission.csv",
+        )
+        save_submission_dataframe(submission, submission_path)
+        append_registry_row(
+            project_path("reports", "experiments", "registry.csv"),
+            {
+                "experiment_name": config["experiment_name"],
+                "stage": "predict",
+                "submission_path": str(submission_path),
+                "checkpoint_path": "insightface_buffalo_l_frozen_dual_verifier",
+                "tta_horizontal_flip": config.get("inference", {}).get("tta_horizontal_flip", False),
+            },
+        )
+        print(f"submission 已生成: {submission_path}")
+        return
+
     dual_checkpoint_modes = (
         "transductive_subcenter_cascade",
         "cross_model_cascade_neighborhood",
@@ -2436,10 +2465,14 @@ def main() -> None:
             unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
             unfreeze_cvlface_norm=config["model"].get("unfreeze_cvlface_norm", True),
             unfreeze_cvlface_feature=config["model"].get("unfreeze_cvlface_feature", True),
+            iresnet_finetune_mode=config["model"].get("iresnet_finetune_mode", "bn_only"),
             loss_name=loss_config.get("name", "cross_entropy"),
             loss_target_labels=loss_config.get("target_labels"),
             arcface_scale=loss_config.get("arcface_scale", 30.0),
             arcface_margin=loss_config.get("arcface_margin", 0.5),
+            cosface_scale=loss_config.get("cosface_scale", loss_config.get("arcface_scale", 30.0)),
+            cosface_margin=loss_config.get("cosface_margin", 0.35),
+            label_smoothing=float(loss_config.get("label_smoothing", 0.0)),
         )
 
     trainer = L.Trainer(

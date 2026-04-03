@@ -183,6 +183,8 @@ def main() -> None:
         loss_target_labels=loss_config.get("target_labels"),
         arcface_scale=loss_config.get("arcface_scale", 30.0),
         arcface_margin=loss_config.get("arcface_margin", 0.5),
+        cosface_scale=loss_config.get("cosface_scale", loss_config.get("arcface_scale", 30.0)),
+        cosface_margin=loss_config.get("cosface_margin", 0.35),
     )
     model = model.to(device)
     model.eval()

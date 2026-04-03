@@ -7,6 +7,7 @@ import sys
 
 import lightning as L
 import pandas as pd
+import torch
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
@@ -20,6 +21,19 @@ from dl_pipeline.data.datamodule import FaceDataModule
 from dl_pipeline.training.progress import AsciiTQDMProgressBar
 from dl_pipeline.training.lightning_module import FaceClassifierModule
 from dl_pipeline.training.monitoring import resolve_monitor_config
+from dl_pipeline.models.classifier import (
+    imprint_cosine_classifier_weight_from_loader,
+    imprint_linear_head_from_loader,
+)
+
+
+def _resolve_train_device(config: dict) -> torch.device:
+    acc = str(config["train"].get("accelerator", "auto")).lower()
+    if acc in ("gpu", "cuda"):
+        if torch.cuda.is_available():
+            return torch.device("cuda", 0)
+        return torch.device("cpu")
+    return torch.device("cpu")
 
 
 def main() -> None:
@@ -39,6 +53,7 @@ def main() -> None:
     output_root = ensure_dir(project_path("outputs", config["experiment_name"]))
     logger = CSVLogger(save_dir=str(output_root / "logs"), name="")
     train_df = pd.read_csv(splits_dir / "train.csv")
+    num_classes = int(train_df["class"].nunique())
     use_full_train = bool(config["data"].get("use_full_train", False))
 
     datamodule = FaceDataModule(
@@ -65,7 +80,7 @@ def main() -> None:
     model = FaceClassifierModule(
         model_family=config["model"]["family"],
         backbone_name=config["model"]["backbone_name"],
-        num_classes=int(train_df["class"].nunique()),
+        num_classes=num_classes,
         pretrained=config["model"]["pretrained"],
         dropout=config["model"]["dropout"],
         learning_rate=config["train"]["learning_rate"],
@@ -81,12 +96,46 @@ def main() -> None:
         unfreeze_stage_count=config["model"].get("unfreeze_stage_count", 0),
         unfreeze_cvlface_norm=config["model"].get("unfreeze_cvlface_norm", True),
         unfreeze_cvlface_feature=config["model"].get("unfreeze_cvlface_feature", True),
+        iresnet_finetune_mode=config["model"].get("iresnet_finetune_mode", "bn_only"),
         loss_name=loss_config.get("name", "cross_entropy"),
         loss_target_labels=loss_config.get("target_labels"),
         arcface_scale=loss_config.get("arcface_scale", 30.0),
         arcface_margin=loss_config.get("arcface_margin", 0.5),
+        cosface_scale=loss_config.get("cosface_scale", loss_config.get("arcface_scale", 30.0)),
+        cosface_margin=loss_config.get("cosface_margin", 0.35),
+        label_smoothing=float(loss_config.get("label_smoothing", 0.0)),
     )
     print("[train] 模型构建完成。", flush=True)
+
+    if config["model"].get("weight_imprinting", False):
+        if config["model"]["family"] != "arcface_iresnet":
+            raise ValueError("model.weight_imprinting 当前仅支持 family: arcface_iresnet")
+        dev = _resolve_train_device(config)
+        model.to(dev)
+        loss_name = loss_config.get("name", "cross_entropy")
+        if loss_name == "cosface":
+            imprint_cosine_classifier_weight_from_loader(
+                model.model,
+                model.cosface_head.weight,
+                datamodule.train_dataloader(),
+                dev,
+                num_classes=num_classes,
+            )
+            print(
+                f"[train] Weight imprinting 已在 {dev} 上完成（各类原型写入 cosface_head.weight）。",
+                flush=True,
+            )
+        else:
+            imprint_linear_head_from_loader(
+                model.model,
+                datamodule.train_dataloader(),
+                dev,
+                num_classes=num_classes,
+            )
+            print(
+                f"[train] Weight imprinting 已在 {dev} 上完成（各类原型写入 Linear.weight）。",
+                flush=True,
+            )
 
     progress_bar = AsciiTQDMProgressBar(refresh_rate=1)
     if use_full_train:
@@ -111,7 +160,8 @@ def main() -> None:
         )
         callbacks = [checkpoint_callback, early_stopping, progress_bar]
 
-    trainer = L.Trainer(
+    accumulate = int(config["train"].get("accumulate_grad_batches", 1))
+    trainer_kwargs: dict = dict(
         max_epochs=config["train"]["max_epochs"],
         accelerator=config["train"]["accelerator"],
         devices=config["train"]["devices"],
@@ -122,10 +172,16 @@ def main() -> None:
         enable_progress_bar=True,
         enable_model_summary=False,
         log_every_n_steps=1,
+        accumulate_grad_batches=accumulate,
     )
+    clip = config["train"].get("gradient_clip_val")
+    if clip is not None:
+        trainer_kwargs["gradient_clip_val"] = float(clip)
+    trainer = L.Trainer(**trainer_kwargs)
     print(
         f"[train] 开始 fit | max_epochs={config['train']['max_epochs']} "
         f"| accelerator={config['train']['accelerator']} devices={config['train']['devices']} "
+        f"| accumulate_grad_batches={accumulate} "
         f"| monitor={monitor_config.metric} ({monitor_config.mode})",
         flush=True,
     )

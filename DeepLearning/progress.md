@@ -1050,3 +1050,199 @@
 - 与 **exp_061** submission 按 `id` 对齐：**6** 条不同（均为 `0 -> 1` 或 `0 -> 2`）。
 - 该 submission 已提交 Kaggle，**public score `0.92731`**，与 **exp_061** 相同。
 - 结论：方向 C 未提升 public 分数；**strongest online baseline** 仍为 **exp_061**（与 exp_062 分数并列）。
+
+### Session 49
+
+- 基于对整体实验历程的学术性复盘，确认了以下战略性问题：
+  1. 任务建模方式错误：一直当作"3 类分类 + 全局阈值"处理，而 2.2 节明确建议"2 个二元分类器"，任务本质是 **face verification**
+  2. 模型多样性不足：所有 backbone 全部来自 AdaFace 家族（同一 loss、同一训练范式）
+  3. ViT-Base 在 80 张数据上做微调收益极低（frozen→微调仅 +0.005），文献支持小数据集下 ViT 更容易过拟合
+  4. look-alike 数据（10 Michael + 10 Sarah）本应用于 per-identity 阈值校准，但一直被当作泛化 other 处理
+- 据此启动 **exp_067**：引入完全不同的模型家族（insightface `buffalo_l` = ArcFace ResNet50@WebFace600K），实现双独立验证器 + look-alike 分簇阈值校准。
+- 关键工程改动：
+  - 新增 `src/dl_pipeline/inference/insightface_dual_verifier.py`：完整的双通道验证推理模块
+  - 新增 `detect_align_with_crop_fallback` embedding 策略：优先从原始 .npy 整图走 RetinaFace 检测+对齐（正确的 ArcFace 输入），检测失败才回退到 HAAR crop
+  - Gallery 和阈值校准使用全部 80 张标注数据（train+val 合并），不再受 train/val split 限制
+  - Youden's J 统计量搜索各通道最优阈值
+- **exp_067** 产物：
+  - 配置：`configs/experiments/exp_067_buffalo_l_detect_align_dual_verifier_lookalike.yaml`
+  - 指标：`outputs/exp_067_buffalo_l_detect_align_dual_verifier_lookalike/prototype_metrics.json`
+  - submission：`data/submissions/20260403_134351_exp_067_buffalo_l_detect_align_dual_verifier_lookalike_submission.csv`
+- 关键校准结果：
+  - `theta_jesse = 0.489`，`theta_mila = 0.363` — 两个阈值相差 **0.126**，直接否定了"全局阈值足够"的假设
+  - 两个通道 FPR 均为 0.0（10 Michael 全拒、10 Sarah 全拒），TPR 分别为 0.90 / 0.93
+  - `val_accuracy = 0.9375`
+  - `detect_align_fallback_count = 38`（原始整图检测率 ~98%，回退仅覆盖硬样本）
+- 与 **exp_061** 按 `id` 对齐：**145** 条预测不同：
+  - `0->1`: 55，`0->2`: 44（从 other 接收为目标类）
+  - `1->0`: 22，`2->0`: 9（从目标类拒识为 other）
+  - `1->2`: 8，`2->1`: 7（类别互换）
+- 该 submission 已提交 Kaggle，**public score `0.92676`**，略低于 **exp_061 = 0.92731**（差 **0.00055**）。
+- 结论：
+  - ArcFace（buffalo_l）在完全不同的模型家族和推理框架下，几乎追平了 AdaFace ViT + neighborhood-aware 的当前最强结果
+  - 两个模型的预测差异高达 **145 张**，但线上分数几乎一致 → 说明两者犯的错误高度互补
+  - 这恰好为下一步的**异构 embedding 融合**提供了最强理论依据
+  - **strongest online baseline 仍为 exp_061 = 0.92731**
+
+### Session 50
+
+- **IResNet50（Glint360K `16backbone.pth`）+ 与 ViT 线相同 `neighborhood_aware` 协议**（`threshold=0.55`、`top_k=15`、`base_weight=0.5`、hflip TTA）已提交 Kaggle，记录 public score 如下。
+- **`exp_071`**（bn_only + Weight Imprinting + `accumulate_grad_batches=8`、20ep）：
+  - submission：`data/submissions/20260403_154045_exp_071_arcface_r50_glint360k_bnonly_wi_accum8_20ep_neighborhoodaware_fixed055_hfliptta_submission.csv`
+  - **Kaggle public score：`0.89207`**
+- **`exp_077`**（last_stage + 较 073 更温和的 LR + `gradient_clip_val=1.0` + WI、35ep）：
+  - submission：`data/submissions/20260403_163843_exp_077_arcface_r50_laststage_mildlr_clip_wi_accum8_35ep_neighborhoodaware_fixed055_hfliptta_submission.csv`
+  - **Kaggle public score：`0.91134`**
+- 对照：**`exp_077` 较 `exp_071` 高约 `0.01927`**；两者均 **低于当前最强 `exp_061 = 0.92731`**（差约 `0.01597` / `0.01587` 量级）。说明在同一 open-set 推理锚点下，**该 IResNet 微调线线上仍明显弱于 ViT CE + neighborhood**，但 **last_stage + mild LR + clip** 相对 **仅 BN** 有稳定 public 增益。
+
+### Session 51
+
+- 已将此前未入库的 `exp_069` 三路异构投票草稿正规化为可复现实验脚本：
+  - `scripts/predict_submission_vote.py`
+- 该脚本支持对已有 submission 做三种标签级融合：
+  - `majority_vote_3way`
+  - `conservative_vote`
+  - `diverse_ensemble`
+- 本轮以三路输入为固定成员重新生成了三个正式实验：
+  - `exp_078_vote_majority_061_067_068`
+  - `exp_079_vote_conservative_061_067_068`
+  - `exp_080_vote_diverse_061_067_068`
+- 三个实验均在 `gpu_env` 中完成，输入固定为：
+  - `exp_061`：`ViT AdaFace + CE + neighborhood_aware`
+  - `exp_067`：`buffalo_l detect_align dual verifier`
+  - `exp_068`：`AdaFace ViT dual verifier`
+- 本轮最重要的工程结论不是某个新分数，而是：
+  - 三种投票策略在当前三路 submission 上**完全收敛为同一份输出**
+  - `exp_078 / exp_079 / exp_080` 的预测分布一致：`{0: 1055, 1: 361, 2: 400}`
+  - `exp_078` 与旧草稿 `exp_069_diverse_ensemble` **逐行完全一致（0 diff）**
+- 相对 strongest online baseline `exp_061`：
+  - 新投票 submission 共 `50 / 1816` 条不同
+  - 迁移方向为：
+    - `0 -> 1`: `11`
+    - `0 -> 2`: `15`
+    - `1 -> 0`: `6`
+    - `1 -> 2`: `8`
+    - `2 -> 0`: `3`
+    - `2 -> 1`: `7`
+- 相对 `exp_067`：
+  - 共 `95` 条不同
+  - 主要是把 `buffalo_l` 的目标类预测收回到更保守的边界：
+    - `1 -> 0`: `44`
+    - `2 -> 0`: `29`
+- 相对 `exp_068`：
+  - 仅 `13` 条不同
+  - 说明当前三路投票的实际主导输出，更接近 `AdaFace ViT dual verifier`，而不是 `exp_061` 或 `exp_067` 的中间平均
+- 当前判断：
+  - 这轮已经完成了“异构 submission-level 投票融合”的第一次正规化落地
+  - 但它没有产生新的策略分叉，说明当前三模型在标签层的可利用自由度有限
+  - 是否值得提交 Kaggle，取决于是否愿意用一次配额验证这 `50` 条受控改动；它值得作为**信息量较高的候选**，但不是高置信必胜替代
+
+### Session 52
+
+- 用户已回报 **`exp_081_vote_majority_061_067_068_fixedcsv` Kaggle public score = `0.90143`**。
+- 该结果直接证伪了“submission label vote 可以吃到 061/067/068 互补性”的假设：
+  - `exp_081` 相比 strongest online baseline `exp_061 = 0.92731` 大幅下滑
+  - 结合 `exp_078/079/080` 实际几乎贴近 `exp_068` 的输出，可判定 **label-level vote 会把强锚点 `exp_061` 拉坏**
+- 据此启动真正的下一步：**`exp_082_vit061_buffalol067_gated_score_fusion_valgrid`**
+  - 新增脚本：`scripts/predict_061_067_gated_fusion.py`
+  - 新增纯逻辑门控模块：`src/dl_pipeline/inference/gated_fusion.py`
+  - 新增单测：`tests/test_gated_fusion.py`
+- 方法设计：
+  - **主锚点**：`exp_061` 的 `neighborhood_aware final_score`
+  - **辅专家**：`exp_067` 的 `dual verifier` 两通道分数与 threshold excess
+  - **门控规则**：
+    - `061` 判 `other` 时，仅当 `067` 的目标类 excess 足够强才“救回”
+    - `061` 判目标类但分数偏低时，允许 `067` 做类别互换或 veto 回 `other`
+  - 参数在 **val** 上做网格搜索：`low_conf_threshold × rescue_margin × swap_margin × veto_excess_threshold`
+- 本轮最重要的实现细节：
+  - `exp_061` 侧严格复现原协议：
+    - **val**：仅用 `train` prototype
+    - **test**：用 `train+val` prototype
+  - `exp_067` 不再沿用“all_labeled 自身参与 val 打分”的宽松日志口径，而是改为：
+    - **val**：`train` gallery + `train` 校准阈值
+    - **test**：`train+val` gallery + `train+val` 校准阈值
+  - `exp_061` / `exp_067` 的 test 预测都与历史正式 submission **完全对齐（0 diff）**，确认重现实验无偏差
+- `exp_082` 结果：
+  - submission：`data/submissions/20260403_175121_exp_082_vit061_buffalol067_gated_score_fusion_valgrid_submission.csv`
+  - metrics：`outputs/exp_082_vit061_buffalol067_gated_score_fusion_valgrid/prototype_metrics.json`
+  - val 分数：
+    - `exp_061`：`0.9375`
+    - `exp_067`（train-only gallery 口径）：`0.8750`
+    - **fused**：`0.9375`
+  - 最优网格参数：
+    - `low_conf_threshold = 0.50`
+    - `rescue_margin = 0.03`
+    - `swap_margin = 0.05`
+    - `veto_excess_threshold = -0.05`
+  - 但该“最优”解在 **val 上对 `exp_061` 一张都没改**（`num_val_changed_vs_061 = 0`）
+- 尽管 val 完全不动，`exp_082` 在 **test** 上却改动了 **99 / 1816** 张，相对 `exp_061` 的迁移为：
+  - `0 -> 1`: `55`
+  - `0 -> 2`: `44`
+  - 预测分布由 `exp_061` 的 `{0:1072, 1:357, 2:387}` 变为 `{0:973, 1:412, 2:431}`
+- 随后对整个 400 点网格做了二次审视：
+  - **没有任何参数组合在 val 上超过 `0.9375`**
+  - 在“保持 val 最优”的前提下，把 `rescue_margin` 从 `0.10` 提到 `0.30`，只能把 test 改动从 `90` 降到 `42`，但 **始终没有任何 val 增益**
+- 结论：
+  - 这条 **061 锚点 + 067 heuristic gate** 线已经得到清晰负结论
+  - 它不是“找到一个可提交门控”，而只是“不同强度地把 067 的接受边界贴回 061”
+  - **当前不值得提交 `exp_082`**；因为它对 val 没有任何收益，却会在 test 上大规模把 `other` 改成目标类，风险与 `exp_081` 属于同一类
+
+### Session 53
+
+- 用户已回报：**`exp_082_vit061_buffalol067_gated_score_fusion_valgrid` Kaggle public score = `0.94768`**。
+- 这条结果推翻了 Session 52 的保守离线判断，说明：
+  - `exp_082` 虽然在固定 val 上无收益，但线上确实抓到了有效互补性
+  - 真正有价值的部分不是“通用多模型融合”，而是 **`exp_067` 对 `exp_061` false reject 的 rescue**
+- 据此，下一步不再做通用 swap/veto gate，而改做：
+  - **rescue-only**
+  - **class-aware margin**
+  - 参数搜索从固定 16 张 val，切换到 **80 张 labeled leave-one-out (LOO)** 口径
+- 新增：
+  - `scripts/predict_061_067_rescueonly_labeledloo.py`
+  - `src/dl_pipeline/inference/gated_fusion.py` 扩展 `apply_rescue_only_fusion` / `select_best_rescue_only_params`
+  - `tests/test_gated_fusion.py` 对应新增单测
+
+### Session 54
+
+- 已完成两版 rescue-only 候选：
+  1. `exp_083_vit061_buffalol067_rescueonly_classaware_labeledloo`
+  2. `exp_084_vit061_buffalol067_rescueonly_classaware_labeledloo_conservative`
+- 共同点：
+  - 仍以 `exp_061` 为锚点
+  - 仅允许 `061 == other` 时被 `067` 救回，不再允许 swap / veto
+  - 参数在 **80 张 labeled LOO** 上搜索，而不是依赖固定 val
+- `exp_083`：
+  - submission：`data/submissions/20260403_181210_exp_083_vit061_buffalol067_rescueonly_classaware_labeledloo_submission.csv`
+  - metrics：`outputs/exp_083_vit061_buffalol067_rescueonly_classaware_labeledloo/prototype_metrics.json`
+  - 最优参数：
+    - `low_conf_threshold = 0.45`
+    - `rescue_margin_jesse = 0.06`
+    - `rescue_margin_mila = 0.06`
+    - `require_anchor_argmax_match = false`
+  - **LOO 指标**：
+    - `exp_061 = 0.9250`
+    - `exp_067 = 0.9125`
+    - `fused = 0.9625`
+  - 在 LOO 上仅改动 **3 张**，但在 test 上相对 `exp_061` 仍改动 **91** 张；相对 `exp_082` 只收回 **8** 张（`1 -> 0: 7`, `2 -> 0: 1`）
+- 对 `exp_083` 的网格进一步筛查后发现：
+  - **存在大块 plateau**：许多参数组合在 LOO 上都保持相同最优 `0.9625`，且同样只改动 `3` 张
+  - 但这些同分组合在 test 上的改动量差别很大：从 **91** 可降到 **64**
+- 因此又补跑了更保守的正式候选 **`exp_084`**：
+  - submission：`data/submissions/20260403_181807_exp_084_vit061_buffalol067_rescueonly_classaware_labeledloo_conservative_submission.csv`
+  - metrics：`outputs/exp_084_vit061_buffalol067_rescueonly_classaware_labeledloo_conservative/prototype_metrics.json`
+  - 固定参数：
+    - `low_conf_threshold = 0.45`
+    - `rescue_margin_jesse = 0.10`
+    - `rescue_margin_mila = 0.30`
+    - `require_anchor_argmax_match = false`
+  - 这组参数与 `exp_083` 在 **LOO 上完全同分**：
+    - `fused = 0.9625`
+    - `num_changes = 3`
+  - 但在 **test** 上明显更保守：
+    - 相对 `exp_061` 改动从 `91` 降到 **`64`**
+    - 相对 `exp_082` 收回 **`35`** 张：
+      - `2 -> 0`: `26`
+      - `1 -> 0`: `9`
+- 当前实验判断：
+  - **若继续在线尝试，优先提交 `exp_084` 而不是 `exp_083`**
+  - 原因不是它离线更高，而是它在**相同 LOO 最优精度**下，对 `exp_082` 的激进 rescue 做了更强收缩，更适合作为“同机制、更保守”的验证候选

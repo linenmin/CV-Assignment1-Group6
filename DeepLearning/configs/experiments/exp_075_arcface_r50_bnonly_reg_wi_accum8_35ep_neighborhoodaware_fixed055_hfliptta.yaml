@@ -1,0 +1,59 @@
+# exp_075：仅 BN + 强正则 + 小 LR + 标签平滑 + 梯度裁剪。
+# 卷积权重不动，尽量保留 Glint360K 嵌入几何，只适配域统计量；常与 prototype/neighborhood 更合拍。
+
+experiment_name: exp_075_arcface_r50_bnonly_reg_wi_accum8_35ep_neighborhoodaware_fixed055_hfliptta
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+  num_workers: 0
+
+model:
+  family: arcface_iresnet
+  backbone_name: r50
+  pretrained: false
+  pretrained_checkpoint_path: models/pretrained/16backbone.pth
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 0
+  iresnet_finetune_mode: bn_only
+  dropout: 0.35
+  weight_imprinting: true
+
+loss:
+  name: cross_entropy
+  label_smoothing: 0.08
+
+train:
+  batch_size: 8
+  accumulate_grad_batches: 8
+  max_epochs: 35
+  learning_rate: 0.00006
+  backbone_learning_rate: 0.00008
+  weight_decay: 0.015
+  gradient_clip_val: 1.0
+  monitor_metric: val_acc
+  monitor_mode: max
+  early_stopping_patience: 12
+  scheduler: cosine
+  accelerator: gpu
+  devices: 1
+  precision: 32
+
+augmentation:
+  use_horizontal_flip: true
+  use_affine: true
+  use_degradation_pack: false
+
+inference:
+  mode: neighborhood_aware
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold: 0.55
+  tta_horizontal_flip: true
+  neighborhood_aware:
+    top_k: 15
+    base_weight: 0.5

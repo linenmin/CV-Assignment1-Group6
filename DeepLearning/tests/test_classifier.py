@@ -3,8 +3,14 @@ from unittest.mock import patch
 
 import torch
 from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
-from dl_pipeline.models.classifier import ArcFaceHead, build_classifier
+from dl_pipeline.models.classifier import (
+    ArcFaceHead,
+    CosFaceHead,
+    build_classifier,
+    imprint_linear_head_from_loader,
+)
 
 
 class DummyBackbone(nn.Module):
@@ -75,6 +81,19 @@ class ClassifierFactoryTests(unittest.TestCase):
             logits_without_margin[0, 1].item(),
             places=6,
         )
+
+    def test_cosface_subtracts_margin_on_target_class_only(self) -> None:
+        head = CosFaceHead(in_features=2, num_classes=2, scale=10.0, margin=0.2)
+        with torch.no_grad():
+            head.weight.copy_(torch.tensor([[1.0, 0.0], [0.0, 1.0]]))
+
+        features = torch.tensor([[1.0, 0.0]])
+        labels = torch.tensor([0])
+        logits_train = head(features, labels)
+        logits_infer = head(features, None)
+
+        self.assertAlmostEqual(logits_train[0, 0].item(), logits_infer[0, 0].item() - 2.0, places=5)
+        self.assertAlmostEqual(logits_train[0, 1].item(), logits_infer[0, 1].item(), places=5)
 
     @patch("dl_pipeline.models.classifier.load_cvlface_backbone")
     def test_build_classifier_can_wrap_cvlface_backbone(self, mock_loader):
@@ -244,6 +263,105 @@ class ClassifierFactoryTests(unittest.TestCase):
                 freeze_backbone=True,
                 unfreeze_stage_count=25,
             )
+
+    @patch("dl_pipeline.models.classifier.resolve_pretrained_checkpoint")
+    @patch("dl_pipeline.models.classifier.torch.load")
+    def test_arcface_iresnet_last_stage_unfreezes_layer4_fc(self, mock_load, mock_resolve):
+        from dl_pipeline.models.iresnet import iresnet50 as ir50
+
+        backbone = ir50()
+        mock_load.return_value = backbone.state_dict()
+        mock_resolve.return_value = "dummy.pth"
+        model = build_classifier(
+            model_family="arcface_iresnet",
+            backbone_name="r50",
+            num_classes=3,
+            pretrained=False,
+            dropout=0.2,
+            pretrained_checkpoint_path="dummy.pth",
+            iresnet_finetune_mode="last_stage",
+        )
+        self.assertFalse(any(p.requires_grad for p in model.backbone.layer1.parameters()))
+        self.assertFalse(any(p.requires_grad for p in model.backbone.layer3.parameters()))
+        self.assertTrue(any(p.requires_grad for p in model.backbone.layer4.parameters()))
+        self.assertTrue(any(p.requires_grad for p in model.backbone.fc.parameters()))
+
+    @patch("dl_pipeline.models.classifier.resolve_pretrained_checkpoint")
+    @patch("dl_pipeline.models.classifier.torch.load")
+    def test_arcface_iresnet_last_two_stages_unfreezes_layer3(self, mock_load, mock_resolve):
+        from dl_pipeline.models.iresnet import iresnet50 as ir50
+
+        backbone = ir50()
+        mock_load.return_value = backbone.state_dict()
+        mock_resolve.return_value = "dummy.pth"
+        model = build_classifier(
+            model_family="arcface_iresnet",
+            backbone_name="r50",
+            num_classes=3,
+            pretrained=False,
+            dropout=0.2,
+            pretrained_checkpoint_path="dummy.pth",
+            iresnet_finetune_mode="last_two_stages",
+        )
+        self.assertTrue(any(p.requires_grad for p in model.backbone.layer3.parameters()))
+
+    @patch("dl_pipeline.models.classifier.resolve_pretrained_checkpoint")
+    @patch("dl_pipeline.models.classifier.torch.load")
+    def test_arcface_iresnet_invalid_finetune_mode_raises(self, mock_load, mock_resolve):
+        from dl_pipeline.models.iresnet import iresnet50 as ir50
+
+        mock_load.return_value = ir50().state_dict()
+        mock_resolve.return_value = "dummy.pth"
+        with self.assertRaises(ValueError):
+            build_classifier(
+                model_family="arcface_iresnet",
+                backbone_name="r50",
+                num_classes=3,
+                pretrained=False,
+                dropout=0.2,
+                pretrained_checkpoint_path="dummy.pth",
+                iresnet_finetune_mode="not_a_mode",
+            )
+
+
+class TinyImprintClassifier(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = nn.Identity()
+        self.classifier = nn.Sequential(nn.Linear(4, 3))
+
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.extract_features(x))
+
+
+class WeightImprintingTests(unittest.TestCase):
+    def test_imprint_sets_unit_norm_class_prototypes(self) -> None:
+        feats = torch.tensor(
+            [
+                [4.0, 0.0, 0.0, 0.0],
+                [0.0, 3.0, 0.0, 0.0],
+                [0.0, 0.0, 5.0, 0.0],
+                [0.0, 0.0, 0.0, 6.0],
+            ],
+            dtype=torch.float32,
+        )
+        labels = torch.tensor([0, 1, 2, 2], dtype=torch.long)
+        loader = DataLoader(TensorDataset(feats, labels), batch_size=4)
+        model = TinyImprintClassifier()
+        imprint_linear_head_from_loader(model, loader, torch.device("cpu"), num_classes=3)
+        linear = model.classifier[-1]
+        w = linear.weight.data
+        self.assertAlmostEqual(w[0, 0].item(), 1.0, places=5)
+        self.assertAlmostEqual(w[0, 1].item(), 0.0, places=5)
+        self.assertAlmostEqual(w[1, 1].item(), 1.0, places=5)
+        # 类 2：两样本先 L2 归一化为 [0,0,1,0] 与 [0,0,0,1]，均值再 L2 归一化
+        expected_2 = torch.tensor([0.0, 0.0, 1.0, 1.0], dtype=torch.float32)
+        expected_2 = expected_2 / expected_2.norm(p=2)
+        self.assertTrue(torch.allclose(w[2], expected_2, atol=1e-5))
+        self.assertTrue(torch.allclose(linear.bias, torch.zeros(3)))
 
 
 if __name__ == "__main__":

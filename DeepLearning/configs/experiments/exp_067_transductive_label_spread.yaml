@@ -1,4 +1,4 @@
-experiment_name: exp_066_transductive_label_spread
+experiment_name: exp_067_transductive_label_spread
 data:
   detector: haar
   processed_dir: data/processed/exp_001_faces_224
@@ -32,7 +32,7 @@ augmentation:
   use_affine: true
   use_degradation_pack: false
 inference:
-  mode: global_label_spread_predictions
+  mode: global_label_spread
   alpha: 0.1
   n_neighbors: 15
   kernel: knn

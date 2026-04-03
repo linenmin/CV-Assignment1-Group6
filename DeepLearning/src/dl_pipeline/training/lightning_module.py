@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 
-from dl_pipeline.models.classifier import ArcFaceHead, build_classifier
+from dl_pipeline.models.classifier import ArcFaceHead, CosFaceHead, build_classifier
 
 
 class FaceClassifierModule(L.LightningModule):
@@ -31,10 +31,14 @@ class FaceClassifierModule(L.LightningModule):
         unfreeze_stage_count: int = 0,
         unfreeze_cvlface_norm: bool = True,
         unfreeze_cvlface_feature: bool = True,
+        iresnet_finetune_mode: str = "bn_only",
         loss_name: str = "cross_entropy",
         loss_target_labels: list[int] | None = None,
         arcface_scale: float = 30.0,
         arcface_margin: float = 0.5,
+        cosface_scale: float = 30.0,
+        cosface_margin: float = 0.35,
+        label_smoothing: float = 0.0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -51,8 +55,8 @@ class FaceClassifierModule(L.LightningModule):
             unfreeze_stage_count=unfreeze_stage_count,
             unfreeze_cvlface_norm=unfreeze_cvlface_norm,
             unfreeze_cvlface_feature=unfreeze_cvlface_feature,
+            iresnet_finetune_mode=iresnet_finetune_mode,
         )
-        self.criterion = nn.CrossEntropyLoss()
         self.loss_name = loss_name
         self.loss_target_labels = list(loss_target_labels or [])
         self.loss_target_label_to_index = {
@@ -75,7 +79,22 @@ class FaceClassifierModule(L.LightningModule):
                 num_classes=len(self.loss_target_labels),
                 average="macro",
             )
+            self.criterion = nn.CrossEntropyLoss()
+        elif self.loss_name == "cosface":
+            self.cosface_head = CosFaceHead(
+                in_features=self._resolve_feature_dim(),
+                num_classes=num_classes,
+                scale=cosface_scale,
+                margin=cosface_margin,
+            )
+            self.val_acc = MulticlassAccuracy(num_classes=num_classes)
+            self.val_f1 = MulticlassF1Score(num_classes=num_classes, average="macro")
+            self.criterion = nn.CrossEntropyLoss()
         else:
+            ls = float(label_smoothing)
+            self.criterion = (
+                nn.CrossEntropyLoss(label_smoothing=ls) if ls > 0.0 else nn.CrossEntropyLoss()
+            )
             self.val_acc = MulticlassAccuracy(num_classes=num_classes)
             self.val_f1 = MulticlassF1Score(num_classes=num_classes, average="macro")
 
@@ -136,6 +155,15 @@ class FaceClassifierModule(L.LightningModule):
         images: torch.Tensor,
         labels: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        if self.loss_name == "cosface":
+            features = self.extract_features(images)
+            logits_margin = self.cosface_head(features, labels)
+            loss = self.criterion(logits_margin, labels)
+            # 指标与推理一致：argmax 用无 margin 的余弦 logits，避免低估 val_acc
+            logits_infer = self.cosface_head(features, None)
+            preds = torch.argmax(logits_infer, dim=1)
+            return loss, preds, labels, int(labels.shape[0])
+
         if self.loss_name != "arcface":
             logits = self(images)
             loss = self.criterion(logits, labels)

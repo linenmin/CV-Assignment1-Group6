@@ -53,6 +53,36 @@ class LightningModuleOptimizerTests(unittest.TestCase):
         self.assertGreater(loss.item(), 0.0)
 
     @patch("dl_pipeline.training.lightning_module.build_classifier")
+    def test_cosface_training_step_finite_loss(self, mock_build_classifier):
+        mock_build_classifier.return_value = DummyModel()
+
+        module = FaceClassifierModule(
+            model_family="cvlface",
+            backbone_name="ir101",
+            num_classes=3,
+            pretrained=True,
+            dropout=0.2,
+            learning_rate=1e-4,
+            backbone_learning_rate=1e-4,
+            weight_decay=1e-4,
+            scheduler_name="cosine",
+            max_epochs=10,
+            pretrained_repo_id="minchul/cvlface_adaface_ir101_webface4m",
+            freeze_backbone=False,
+            unfreeze_last_stage=False,
+            loss_name="cosface",
+            cosface_scale=16.0,
+            cosface_margin=0.2,
+        )
+
+        images = torch.randn(4, 4)
+        labels = torch.tensor([0, 1, 2, 0])
+        loss = module.training_step((images, labels), 0)
+
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(loss.item(), 0.0)
+
+    @patch("dl_pipeline.training.lightning_module.build_classifier")
     def test_configure_optimizers_separates_backbone_learning_rate(self, mock_build_classifier):
         mock_build_classifier.return_value = DummyModel()
 

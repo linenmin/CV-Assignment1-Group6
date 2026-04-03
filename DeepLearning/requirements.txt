@@ -14,3 +14,6 @@ huggingface_hub>=0.28
 transformers>=4.40
 omegaconf>=2.3
 facenet-pytorch>=2.6
+
+# 可选：exp_066 InsightFace 双验证器
+# pip install insightface onnxruntime-gpu

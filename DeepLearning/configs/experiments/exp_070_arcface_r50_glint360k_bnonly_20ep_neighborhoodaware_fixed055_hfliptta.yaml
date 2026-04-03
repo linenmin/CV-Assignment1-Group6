@@ -1,0 +1,51 @@
+# exp_070：InsightFace arcface_torch IResNet50（Glint360K 预训练 16backbone.pth）
+# 冻结 Conv/PReLU/fc，仅训练 BatchNorm + 新 3 类线性头；推理对齐 exp_061。
+
+experiment_name: exp_070_arcface_r50_glint360k_bnonly_20ep_neighborhoodaware_fixed055_hfliptta
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+  num_workers: 0
+
+model:
+  family: arcface_iresnet
+  backbone_name: r50
+  pretrained: false
+  pretrained_checkpoint_path: models/pretrained/16backbone.pth
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 0
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 20
+  learning_rate: 0.0003
+  backbone_learning_rate: 0.001
+  weight_decay: 0.0001
+  monitor_metric: val_acc
+  monitor_mode: max
+  early_stopping_patience: 6
+  scheduler: cosine
+  accelerator: gpu
+  devices: 1
+  precision: 32
+
+augmentation:
+  use_horizontal_flip: true
+  use_affine: true
+  use_degradation_pack: false
+
+inference:
+  mode: neighborhood_aware
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold: 0.55
+  tta_horizontal_flip: true
+  neighborhood_aware:
+    top_k: 15
+    base_weight: 0.5

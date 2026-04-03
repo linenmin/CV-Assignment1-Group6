@@ -1,0 +1,59 @@
+# exp_074：在 exp_073「last_stage」思路上加强正则、显著减小 LR、梯度裁剪、标签平滑，
+# 减轻对预训练 embedding 几何的破坏，争取 neighborhood 指标回升。
+
+experiment_name: exp_074_arcface_r50_laststage_regclip_wi_accum8_40ep_neighborhoodaware_fixed055_hfliptta
+
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+  num_workers: 0
+
+model:
+  family: arcface_iresnet
+  backbone_name: r50
+  pretrained: false
+  pretrained_checkpoint_path: models/pretrained/16backbone.pth
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 0
+  iresnet_finetune_mode: last_stage
+  dropout: 0.45
+  weight_imprinting: true
+
+loss:
+  name: cross_entropy
+  label_smoothing: 0.1
+
+train:
+  batch_size: 8
+  accumulate_grad_batches: 8
+  max_epochs: 40
+  learning_rate: 0.00008
+  backbone_learning_rate: 0.000005
+  weight_decay: 0.02
+  gradient_clip_val: 1.0
+  monitor_metric: val_acc
+  monitor_mode: max
+  early_stopping_patience: 14
+  scheduler: cosine
+  accelerator: gpu
+  devices: 1
+  precision: 32
+
+augmentation:
+  use_horizontal_flip: true
+  use_affine: true
+  use_degradation_pack: false
+
+inference:
+  mode: neighborhood_aware
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold: 0.55
+  tta_horizontal_flip: true
+  neighborhood_aware:
+    top_k: 15
+    base_weight: 0.5

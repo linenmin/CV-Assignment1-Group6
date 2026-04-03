@@ -1,0 +1,43 @@
+# exp_067：buffalo_l detect_align（原始整图 RetinaFace 对齐）+ 双独立验证器 + look-alike 校准
+# 关键改变 vs exp_066：从 direct_arcface（HAAR crop 无对齐）改为 detect_align_with_crop_fallback
+# 运行：python scripts/predict.py --config configs/experiments/exp_067_buffalo_l_detect_align_dual_verifier_lookalike.yaml
+
+experiment_name: exp_067_buffalo_l_detect_align_dual_verifier_lookalike
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+  num_workers: 0
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: true
+train:
+  batch_size: 8
+  max_epochs: 1
+  learning_rate: 0.0003
+  accelerator: cpu
+  devices: 1
+  precision: 32
+  scheduler: cosine
+inference:
+  mode: insightface_dual_verifier
+  insightface_name: buffalo_l
+  # 核心改进：优先从原始 .npy 整图做 RetinaFace 检测+对齐，检测失败才回退到 HAAR crop
+  insightface_embedding: detect_align_with_crop_fallback
+  det_size:
+  - 640
+  - 640
+  ctx_id: 0
+  gallery_top_k: 5
+  tta_horizontal_flip: true
+  jesse_class: 1
+  mila_class: 2
+  other_class: 0
+  michael_like_cluster: 1
+  sarah_like_cluster: 0
+  lookalike_assignments_csv: reports/analysis/exp_029_other_k2/other_cluster_assignments.csv

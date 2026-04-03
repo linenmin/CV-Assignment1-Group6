@@ -1164,6 +1164,237 @@
 - Kaggle public score：**`0.92731`**，与 **exp_061** 相同；说明在当前线上划分下，自适应阈值 + 伪标签未带来额外 public 增益。
 - **结论**：线上最强仍为 **exp_061**（与 exp_062 并列分数）；方向 C 可作为方法记录，提交优先级不高于 exp_061。
 
+### `exp_071` / `exp_077`：IResNet50（Glint360K）+ neighborhood_aware（2026-04-03）
+
+- 与 **exp_047 / exp_061** 使用相同的推理协议：`neighborhood_aware`、`threshold=0.55`、`top_k=15`、`base_weight=0.5`、水平翻转 TTA；backbone 为 InsightFace 风格 **IResNet50**，预训练权重 `16backbone.pth`（Glint360K），`CrossEntropy` + 线性头，**Weight Imprinting** 初始化头；`batch_size=8`、`accumulate_grad_batches=8`。
+- **`exp_071`**：`iresnet_finetune_mode` 为 **bn_only**（仅 BN 可训）；`max_epochs=20`；`learning_rate=2e-4`、`backbone_learning_rate=5e-4`。
+  - submission：`data/submissions/20260403_154045_exp_071_arcface_r50_glint360k_bnonly_wi_accum8_20ep_neighborhoodaware_fixed055_hfliptta_submission.csv`
+  - **Kaggle public score：`0.89207`**
+- **`exp_077`**：**last_stage**（layer4 + bn2 + fc + features）；较 exp_073 **降低** head / backbone LR，并设 **`gradient_clip_val=1.0`**；`max_epochs=35`、`early_stopping_patience=12`。
+  - submission：`data/submissions/20260403_163843_exp_077_arcface_r50_laststage_mildlr_clip_wi_accum8_35ep_neighborhoodaware_fixed055_hfliptta_submission.csv`
+  - **Kaggle public score：`0.91134`**
+- **对照**：`exp_077` 较 `exp_071` **+0.01927**（public）；二者均 **低于 `exp_061 = 0.92731`**。结论：在固定阈值与邻域设定下，**IResNet 该训练配方仍整体弱于 ViT CE 微调线**，但 **适度解冻 last stage + 温和 LR + 梯度裁剪** 相对 **仅 BN** 可复现线上提升。
+
+### `exp_078` / `exp_079` / `exp_080`：三路异构 submission 投票正规化（2026-04-03）
+
+- 这轮不是继续发明新 scorer，而是把此前未入库的 `exp_069` 草稿结果补成可复现实验入口：
+  - 新增脚本：`scripts/predict_submission_vote.py`
+  - 输入固定为三路已完成 submission：
+    1. `exp_061`：`ViT AdaFace + CE + neighborhood_aware`
+    2. `exp_067`：`buffalo_l detect_align dual verifier`
+    3. `exp_068`：`AdaFace ViT dual verifier`
+- 正式生成了三种标签级融合：
+  - `exp_078_vote_majority_061_067_068`
+  - `exp_079_vote_conservative_061_067_068`
+  - `exp_080_vote_diverse_061_067_068`
+
+#### 本轮最关键的事实
+
+- 三种策略在当前三路输入上**完全塌缩成同一份 submission**：
+  - 三者预测分布一致：`{0: 1055, 1: 361, 2: 400}`
+  - `exp_078` 与旧 `exp_069_diverse_ensemble` **0 diff**
+- 这意味着：
+  1. 当前三路模型在标签层的结构关系比预想中更简单；
+  2. “多数投票 / 保守投票 / 多样性优先”在当前样本分布上并没有形成不同决策面；
+  3. 因而如果继续深挖这条线，下一步不能再只是换投票规则名字，而必须引入**分数级**或**样本级 gating**，否则只会重复得到同一份 submission。
+
+#### 与各基线的对比
+
+- 相对 `exp_061`：
+  - 共 `50 / 1816` 条不同
+  - 迁移为：
+    - `0 -> 1`: `11`
+    - `0 -> 2`: `15`
+    - `1 -> 0`: `6`
+    - `1 -> 2`: `8`
+    - `2 -> 0`: `3`
+    - `2 -> 1`: `7`
+- 相对 `exp_067`：
+  - 共 `95` 条不同
+  - 主要是把 `buffalo_l` 的更激进目标类接受收回：
+    - `1 -> 0`: `44`
+    - `2 -> 0`: `29`
+- 相对 `exp_068`：
+  - 仅 `13` 条不同
+  - 说明这轮投票融合的实际主导面，更接近 `AdaFace ViT dual verifier`
+
+#### 阶段性判断
+
+- 这轮结果有价值，但要解释准确：
+  - 它不是“新的已证实最优方法”
+  - 它是**第一版可复现的异构标签级融合候选**
+- 从实验管理角度，这轮是值得保留和必要的，因为它回答了一个之前悬而未决的问题：
+  - 旧 `exp_069` 草稿不是偶然文件，而是可被稳定复现的
+- 从 Kaggle 提交优先级看：
+  - 它**值得用一次配额验证**
+  - 但不是高置信度“应该直接替换 `exp_061`”的候选
+- 若这轮线上不涨，下一步应明确停止继续扫 label-vote 变体，转向：
+  1. `exp_061 / exp_067 / exp_068` 的**分数级融合**
+  2. 仅在三模型分歧样本上生效的**样本级 gating / meta-decider**
+
+### `exp_081` / `exp_082`：label vote 证伪后，061+067 score-level gate 的负结果（2026-04-03）
+
+- 用户已回报 **`exp_081_vote_majority_061_067_068_fixedcsv` 的 Kaggle public score = `0.90143`**。这是一个强负例：
+  - 说明三路模型的互补性**不能**通过 submission 标签多数投票直接兑现
+  - 也说明 `exp_061` 必须被视为**强锚点**，不能在标签层被 `067/068` 对称覆盖
+- 基于这个结论，本轮实现了真正的 **score-level / sample-wise gating**：
+  - 新增门控逻辑模块：`src/dl_pipeline/inference/gated_fusion.py`
+  - 新增实验脚本：`scripts/predict_061_067_gated_fusion.py`
+  - 规则是：
+    1. `exp_061` 仍负责主决策
+    2. 仅当 `061` 低置信时，允许 `067` 做三类动作：`other -> target` rescue、`target -> target` swap、`target -> other` veto
+    3. `067` 的可信度不看最终标签本身，而看 **selected excess / best excess**（相对其 per-identity threshold 的超额）
+
+#### 为何这版 gate 比之前更严谨
+
+- `exp_061` 侧严格复现原线上协议：
+  - **val**：`train` prototype
+  - **test**：`train+val` prototype
+- `exp_067` 侧不再沿用原日志里“all_labeled 自己给自己打 val 分”的宽松口径，而改为：
+  - **val**：`train` gallery + `train` look-alike 阈值校准
+  - **test**：`train+val` gallery + `train+val` 阈值校准
+- 这一步很关键，因为它让 gate 的参数搜索不再建立在一个自泄漏的 `067 val_acc` 上。
+
+#### 结果
+
+- `exp_061` / `exp_067` 的 test 预测都与历史正式 submission **0 diff**，说明这轮复算没有偏移。
+- `exp_082_vit061_buffalol067_gated_score_fusion_valgrid`：
+  - val：
+    - `exp_061 = 0.9375`
+    - `exp_067 (train-only gallery) = 0.8750`
+    - **fused = 0.9375**
+  - 网格：`low_conf_threshold × rescue_margin × swap_margin × veto_excess_threshold = 400` 组
+  - 最优参数对应：
+    - `low_conf_threshold = 0.50`
+    - `rescue_margin = 0.03`
+    - `swap_margin = 0.05`
+    - `veto_excess_threshold = -0.05`
+  - 但这个“最优”解在 val 上 **对 `exp_061` 完全没有改动**（`num_val_changed_vs_061 = 0`）
+
+#### 这说明什么
+
+- 这条线最大的失败点不是“线上没试”，而是 **离线已经不给你正信号**：
+  - 在 val 上，任何 gate 都没能超过 `exp_061`
+  - 也就是说，`067` 在当前规则形态下，并没有在这个验证口径里提供可利用的稳定补充信息
+- 更危险的是：虽然 val 完全不动，test 上 gate 却会大量触发
+  - `exp_082` 相对 `exp_061` 改了 **99 / 1816** 张
+  - 全部大头都是：
+    - `0 -> 1`: `55`
+    - `0 -> 2`: `44`
+  - 分布从 `{0:1072, 1:357, 2:387}` 变成 `{0:973, 1:412, 2:431}`
+- 这是一种非常不健康的模式：
+  - **验证集零收益**
+  - **测试集大规模扩大目标类接受**
+  - 本质上仍然是 `067` 把 `061` 的 `other` 边界顶开了，只是从 label vote 改成了 heuristic gate
+
+#### 二次审查后的更强结论
+
+- 对全部 400 组参数做二次筛查后：
+  - **没有任何组合** 在 val 上超过 `0.9375`
+  - 即使把 `rescue_margin` 一路调大，test 改动只是从 `90+` 慢慢降到 `42`，但**始终没有带来 val 增益**
+- 所以这轮结果已经足够下结论：
+  - `061 + 067` 的**手工 heuristic gate** 不是当前通往 `0.97` 的主线
+  - 它没有把互补性转化成可验证的离线收益
+  - 如果继续在这个规则空间里扫，只会得到“不同强度的 067 注入量”，不会得到真正可解释的性能提升
+
+#### 下一步启示
+
+- 该停止的不是“异构融合”本身，而是：
+  - submission label vote
+  - 手工阈值式 heuristic gating
+- 仍然值得继续的，是更高一层的融合形态：
+  1. **OOF / CV score stacking**
+  2. **disagreement-only meta-decider**
+  3. **更强外部数据驱动的 verification 校准**
+
+### `exp_082` 线上突破后，`exp_083` / `exp_084`：rescue-only + class-aware + labeled LOO（2026-04-03）
+
+- 用户随后回报：**`exp_082` Kaggle public score = `0.94768`**。
+- 这条结果非常重要，因为它说明：
+  - 我们此前对 `exp_082` 的离线风险判断并没有错，但**固定 val 明显低估了这类 rescue 机制**
+  - 真正有效的不是通用 gate，而是：**用 `067` 有条件地救回 `061` 的 false reject**
+
+#### 因此，本轮策略发生了一个明确收缩
+
+- 停止继续沿着 `swap / veto` 扩张
+- 只保留最有证据的动作：`061 == other` 时的 **rescue-only**
+- 同时把参数从全局统一改成：
+  - `rescue_margin_jesse`
+  - `rescue_margin_mila`
+- 更关键的是，把参数搜索从固定 16 张 val，切换到 **80 张 labeled 的 leave-one-out (LOO)** 口径
+
+#### 为什么要换成 labeled LOO
+
+- 在固定 val 上，`061 == 0` 且 `067 != 0` 的 rescue 子集是 **0 个样本**
+- 这意味着旧 val 根本无法评估 rescue-only 机制
+- 继续在那 16 张上扫参数，只会得到伪稳健结论
+- LOO 虽然也不是完美终极答案，但至少让参数搜索真正落在“会发生 rescue 的样本”上
+
+#### `exp_083`：第一版 rescue-only 候选
+
+- 新脚本：`scripts/predict_061_067_rescueonly_labeledloo.py`
+- 新逻辑：
+  - 仅当 `exp_061` 判 `other`
+  - 且 `exp_067` 的对应身份 excess 超过类特异 margin
+  - 才允许 `other -> Jesse/Mila`
+- `exp_083` 的最优参数为：
+  - `low_conf_threshold = 0.45`
+  - `rescue_margin_jesse = 0.06`
+  - `rescue_margin_mila = 0.06`
+  - `require_anchor_argmax_match = false`
+- **LOO**：
+  - `exp_061 = 0.9250`
+  - `exp_067 = 0.9125`
+  - **fused = 0.9625**
+- 这个信号比固定 val 强得多，说明 rescue-only 机制在更广的 labeled 口径下确实成立
+
+#### 但 `exp_083` 仍偏激进
+
+- 虽然 LOO 上只改了 **3 张**
+- 但 test 上相对 `exp_061` 仍改动了 **91** 张
+- 相对 `exp_082` 只收回了 **8** 张
+- 这说明：直接拿“第一个 LOO 最优参数”上线，仍然太激进
+
+#### plateau 现象与 `exp_084`
+
+- 对完整网格进一步检查后发现一个很有价值的结构：
+  - 大量参数组合在 **LOO 上达到完全相同的最优精度 `0.9625`**
+  - 且同样只改动 **3** 个 labeled 样本
+  - 但是它们在 test 上的改动量差异很大：从 **91** 到 **64**
+- 这说明 rescue-only 参数空间里存在明显 plateau：
+  - **离线同分**
+  - **线上风险不同**
+- 因此补跑了更保守的 plateau 候选 **`exp_084`**：
+  - `low_conf_threshold = 0.45`
+  - `rescue_margin_jesse = 0.10`
+  - `rescue_margin_mila = 0.30`
+  - `require_anchor_argmax_match = false`
+- 它与 `exp_083` 在 **LOO 上完全同分**：
+  - `fused = 0.9625`
+  - `num_changes = 3`
+- 但它在 test 上更收缩：
+  - 相对 `exp_061`：改动 **64** 张（低于 `exp_083` 的 91）
+  - 相对 `exp_082`：收回 **35** 张
+    - `2 -> 0`: `26`
+    - `1 -> 0`: `9`
+
+#### 这轮的真正收获
+
+- 不是“又找到一个更高分 submission”，因为线上还没回报
+- 而是我们把 `exp_082` 的成功机制拆解得更清楚了：
+  1. 成功来自 **false reject rescue**
+  2. rescue-only 在更广 labeled 口径下是有离线支持的
+  3. 该机制存在明显 parameter plateau，所以**保守选点**是必要的
+
+#### 当前最合理的在线候选顺序
+
+- 若只提交一版新的验证候选：
+  - **优先 `exp_084`，而不是 `exp_083`**
+- 理由很直接：
+  - `exp_083` 与 `exp_084` 在 LOO 上同分
+  - `exp_084` 对 `exp_082` 更保守、收回更多低把握 rescue
+  - 因而它更适合作为“同机制、更稳健”的下一跳验证
+
 ### `exp_048` / neighborhood 参数网格（2026-04-02）
 
 - 已运行 `scripts/sweep_neighborhood_aware.py`（`gpu_env`），在固定 `exp_047` 协议（`threshold=0.55`、TTA、train+val prototype）下扫描 `top_k ∈ {5,10,15,20,30}` 与 `base_weight ∈ {0.3,0.4,0.5,0.6,0.7}`。

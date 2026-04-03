@@ -1,0 +1,45 @@
+# exp_066：InsightFace buffalo_l（ArcFace 系）冻结特征 + 双独立验证器 + look-alike 分簇阈值校准
+# 运行：在 DeepLearning 目录下
+#   pip install insightface onnxruntime-gpu
+#   python scripts/predict.py --config configs/experiments/exp_066_buffalo_l_dual_verifier_lookalike.yaml
+# 说明：不加载 PyTorch checkpoint；Michael/Sarah 子类来自 exp_029 聚类表（仅 train 行用于校准负样本）
+
+experiment_name: exp_066_buffalo_l_dual_verifier_lookalike
+data:
+  detector: haar
+  processed_dir: data/processed/exp_001_faces_224
+  splits_dir: data/splits/exp_001
+  face_size: 112
+  normalization: face
+  num_workers: 0
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: true
+train:
+  batch_size: 8
+  max_epochs: 1
+  learning_rate: 0.0003
+  accelerator: cpu
+  devices: 1
+  precision: 32
+  scheduler: cosine
+inference:
+  mode: insightface_dual_verifier
+  insightface_name: buffalo_l
+  # 与 HAAR processed 一致：输入已是人脸 crop，直接 ArcFace（非「检测失败回退」）
+  insightface_embedding: direct_arcface
+  det_size:
+  - 640
+  - 640
+  ctx_id: 0
+  gallery_top_k: 5
+  tta_horizontal_flip: false
+  jesse_class: 1
+  mila_class: 2
+  other_class: 0
+  michael_like_cluster: 1
+  sarah_like_cluster: 0
+  lookalike_assignments_csv: reports/analysis/exp_029_other_k2/other_cluster_assignments.csv
