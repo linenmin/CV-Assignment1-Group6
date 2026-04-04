@@ -52,7 +52,11 @@ from dl_pipeline.inference.prototype import (
     spectral_cluster_with_gallery_label_matching,
 )
 from dl_pipeline.inference.svm import train_and_predict_svm
-from dl_pipeline.inference.submission import build_submission_dataframe, save_submission_dataframe
+from dl_pipeline.inference.submission import (
+    apply_submission_postprocess,
+    build_submission_dataframe,
+    save_submission_dataframe,
+)
 from dl_pipeline.inference.tta import extract_tta_features
 from dl_pipeline.training.progress import AsciiTQDMProgressBar
 from dl_pipeline.training.lightning_module import FaceClassifierModule
@@ -2427,17 +2431,32 @@ def main() -> None:
     loss_config = config.get("loss", {})
 
     inference_mode = config.get("inference", {}).get("mode", "softmax")
+    submission_postprocess_config = config.get("submission_postprocess", {})
     if inference_mode == "insightface_dual_verifier":
         from dl_pipeline.inference.insightface_dual_verifier import run_insightface_dual_verifier
 
         test_df_early = pd.read_csv(splits_dir / "test.csv")
         ordered_predictions = run_insightface_dual_verifier(config, test_df_early)
         submission = build_submission_dataframe(test_df_early, ordered_predictions)
+        submission_before_postprocess = submission.copy()
+        submission = apply_submission_postprocess(submission, submission_postprocess_config)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         submission_path = project_path(
             config["data"]["submissions_dir"],
             f"{timestamp}_{config['experiment_name']}_submission.csv",
         )
+        if submission_postprocess_config and bool(submission_postprocess_config.get("enabled", False)):
+            changed_rows = submission["class"] != submission_before_postprocess["class"]
+            postprocess_summary = {
+                "enabled": True,
+                "mode": submission_postprocess_config.get("mode"),
+                "num_changed_rows": int(changed_rows.sum()),
+                "changed_ids": [int(idx) for idx in submission.index[changed_rows].tolist()],
+            }
+            (output_root / "submission_postprocess.json").write_text(
+                json.dumps(postprocess_summary, indent=2),
+                encoding="utf-8",
+            )
         save_submission_dataframe(submission, submission_path)
         append_registry_row(
             project_path("reports", "experiments", "registry.csv"),
@@ -2587,6 +2606,20 @@ def main() -> None:
 
         ordered_predictions = [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
     submission = build_submission_dataframe(test_df, ordered_predictions)
+    submission_before_postprocess = submission.copy()
+    submission = apply_submission_postprocess(submission, submission_postprocess_config)
+    if submission_postprocess_config and bool(submission_postprocess_config.get("enabled", False)):
+        changed_rows = submission["class"] != submission_before_postprocess["class"]
+        postprocess_summary = {
+            "enabled": True,
+            "mode": submission_postprocess_config.get("mode"),
+            "num_changed_rows": int(changed_rows.sum()),
+            "changed_ids": [int(idx) for idx in submission.index[changed_rows].tolist()],
+        }
+        (output_root / "submission_postprocess.json").write_text(
+            json.dumps(postprocess_summary, indent=2),
+            encoding="utf-8",
+        )
 
     if args.checkpoint is None and inference_mode in dual_checkpoint_modes:
         if inference_mode == "transductive_subcenter_cascade":

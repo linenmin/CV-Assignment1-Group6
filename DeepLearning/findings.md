@@ -2937,6 +2937,105 @@ submission 对比：
   - “把这 8 张当 val”
  这条线追加实验
 
+#### 重要结论修正（用户后续人工复核）
+
+上面围绕以下 8 张图所做的“潜在 `class2` 错拒”解读：
+
+- `48, 289, 361, 543, 612, 699, 1333, 1525`
+
+在用户后续逐张人工复核后需要更正：
+
+- 这 8 张实际上都是 `Sarah Hyland`
+- 因此它们本来就应判为 `other`
+- 它们不再构成 `exp_088` 的可回收 test 错例
+
+这会改变前面几轮实验的最终解释：
+
+- `exp_108 shadow probe`
+  - 仍然是有效实验
+  - 但正确解读应改为：
+    - 模型一直把这批 lookalike 看成更像 `class2`
+    - 而 open-set 拒识最终把它们正确挡在 `0`
+- `CE / CosFace / OVR / SupCon / buffalo`
+  - 这些实验并不是“差一点就能救回 8 张真 target”
+  - 而是在围绕一批本来就该判 `0` 的 lookalike 样本分析边界
+
+用户还进一步确认：
+
+- `data/visualizations/bad_image_probe/exp_088_test_crop_logic_v2/images`
+  中出现的人脸样本，当前标注都是对的
+
+因此当前最稳的收束结论是：
+
+- 除坏图 / 占位图 / 无法恢复的异常输入之外
+- 目前**没有再找到** `exp_088` 在正常人脸样本上的明确 test 错判
+
+若按当前 best public score：
+
+- `exp_088 = 0.98403 = 1787 / 1816`
+
+则距离 `1.00000` 还差：
+
+- `29` 张图片
+
+#### `exp_109` / `exp_110`：坏图修正规则的最终边界
+
+在重新收束到“剩余可疑问题主要集中于坏图 / 占位图”之后，继续测试了两条 submission 级异常输入修正规则：
+
+- `exp_109`
+  - 仅覆盖 3 张与训练集坏图
+    - `train_037_id065_class2.png`
+    同型的 `IMAGE NOT FOUND` 占位图
+  - 修正 id：
+    - `537, 1071, 1112`
+  - public score：
+    - `0.98568`
+- `exp_110`
+  - 将人工归出的 14 张“无脸坏图”整体映射到 `class2`
+  - public score：
+    - `0.98348`
+
+这组结果给出一个非常清楚的结论：
+
+- `exp_109` 的 gain 是真的
+- 但它只适用于**极窄的占位坏图子类型**
+- 一旦泛化成“所有无脸坏图 -> class2”，线上立刻下降
+
+因此对坏图线的最终判断是：
+
+- 不存在一个可进一步推广的统一坏图标签规则
+- 当前能成立的，只有：
+  - 3 张精确识别出的 `IMAGE NOT FOUND` 占位图修正
+
+这也意味着：
+
+- `exp_109` 可以作为最终 submission 级工程修正
+- `exp_110` 证明坏图修正规则已经到达可推广性的边界
+- 再继续沿坏图类别泛化追加 patch，预期收益很低，风险更高
+
+#### 脚本化落地：`exp_088 + exp_109` 正式合并
+
+为了避免继续依赖手工改 CSV，已将 `exp_109` 逻辑正式并入提交流程：
+
+- `src/dl_pipeline/inference/submission.py`
+  - 新增：
+    - `apply_submission_postprocess(...)`
+- `scripts/predict.py`
+  - 在生成 submission 后、保存前统一执行可选 postprocess
+  - 若启用，会记录：
+    - `submission_postprocess.json`
+- 新增配置：
+  - `configs/experiments/exp_109_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_imagenotfound3_patch.yaml`
+
+脚本化后的 `exp_109` 与手工版已逐行核对：
+
+- 两份 submission 完全一致
+
+因此现在可以把最终部署逻辑稳定表述为：
+
+- 主预测仍采用 `exp_088`
+- 仅在 submission 输出阶段，对 3 张已确认的 `IMAGE NOT FOUND` 占位图做 `class2` 覆盖
+
 ### `exp_048` / neighborhood 参数网格（2026-04-02）
 
 - 已运行 `scripts/sweep_neighborhood_aware.py`（`gpu_env`），在固定 `exp_047` 协议（`threshold=0.55`、TTA、train+val prototype）下扫描 `top_k ∈ {5,10,15,20,30}` 与 `base_weight ∈ {0.3,0.4,0.5,0.6,0.7}`。

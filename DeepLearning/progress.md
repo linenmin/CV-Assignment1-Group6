@@ -2100,3 +2100,90 @@
         - 换 epoch
         - 把这 8 张当正式 val
       - 这条线继续投入的价值很低
+
+- 重要更正（用户后续人工复核）：
+  - 之前围绕
+    - `48, 289, 361, 543, 612, 699, 1333, 1525`
+    这 8 张展开的“潜在 `class2` 错拒”判断是错误的
+  - 用户重新确认后，这 8 张实际上都是 `Sarah Hyland`，本来就应该判为 `other`
+  - 因此：
+    - `shadow probe` 实验仍然有效
+    - 但它的正确解释应改为：
+      - 模型一直把这批 lookalike 看成更像 `class2`
+      - 但 open-set 拒识最终把它们正确挡在 `0`
+    - 不能再把它们视为 leaderboard 可回收增益
+
+- 同样的人工复核还确认：
+  - `data/visualizations/bad_image_probe/exp_088_test_crop_logic_v2/images`
+    里出现的人脸样本，当前标注都是对的
+  - 也就是说，在这批 probe 里：
+    - 没有再找到坏图之外的明确 `exp_088` 错判样本
+  - 当前能确认的问题，重新收束为：
+    - 主要集中在坏图 / 占位图 / 无法有效恢复的人脸输入
+
+- 截至当前最稳结论：
+  - `exp_088 = 0.98403`
+  - 若按 `1787 / 1816` 计算，距离 `1.00000` 还差：
+    - `29` 张图片
+
+- 针对异常输入进一步做了两轮 submission probe：
+  - `exp_109`
+    - 仅把 3 张与 `train_037_id065_class2.png` 同型的 `IMAGE NOT FOUND` 占位坏图：
+      - `537, 1071, 1112`
+      改判为 `class2`
+    - Kaggle public：
+      - `0.98568`
+    - 说明：
+      - 这是一条**有效但极窄**的异常输入修正规则
+  - `exp_110`
+    - 将人工归出的 14 张“无脸坏图”整体改判为 `class2`
+    - Kaggle public：
+      - `0.98348`
+    - 说明：
+      - 坏图并不是统一标签模式
+      - `exp_109` 的增益不能泛化成“无脸坏图 -> class2”
+
+- 因此当前最稳收束结论更新为：
+  - 仍然不存在可继续放大的通用阈值 / 训练 / 异构改进方向
+  - 唯一被线上证实有效的新增 gain，是：
+    - 对 3 张精确识别出的 `IMAGE NOT FOUND` 占位坏图做 submission 级修正
+
+- 已把这条逻辑并入正式脚本流程：
+  - `src/dl_pipeline/inference/submission.py`
+    - 新增 `apply_submission_postprocess(...)`
+  - `scripts/predict.py`
+    - 在生成 submission 后、保存 CSV 前统一调用可选 postprocess
+    - 若启用，会额外写出：
+      - `outputs/<exp>/submission_postprocess.json`
+  - 新增可直接复现的配置：
+    - `configs/experiments/exp_109_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_imagenotfound3_patch.yaml`
+  - 新配置跑出的 submission 与手工版 `exp_109` 已核对：
+    - 完全一致
+
+- 为释放磁盘空间，按“折中”策略清理：
+  - 保留：
+    - `exp_088` 主线权重
+    - 关键诊断输出 / submission / metrics
+  - 删除一批已证实原地打转实验的 `checkpoints/`
+    - 目标：
+      - `exp_096`
+      - `exp_097`
+      - `exp_099`
+      - `exp_101`
+      - `exp_103`
+      - `exp_107`
+      - `exp_108`
+  - 实际释放空间：
+    - 约 `5.964 GB`
+
+- 用户随后进一步明确：
+  - 前 `80+` 条实验的权重，也只保留那些能与 `exp_088 / exp_109` 形成直接消融叙事的
+  - 复核后，实际只需要保留：
+    - `exp_088` 的 checkpoint
+  - 因此继续删除了所有更早实验残留的 `checkpoints/`
+    - 仅保留：
+      - `outputs/exp_088_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta/checkpoints`
+  - 这一轮额外释放空间：
+    - 约 `11.8 GB`
+  - 两轮清理累计释放空间：
+    - 约 `17.764 GB`

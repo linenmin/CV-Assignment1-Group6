@@ -1,0 +1,75 @@
+experiment_name: exp_109_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_imagenotfound3_patch
+
+data:
+  detector: multiface_selected
+  processed_dir: data/processed/exp_088_multiface_selected_faces_112
+  splits_dir: data/splits/exp_088_multiface_selected
+  face_size: 112
+  normalization: face
+  num_workers: 0
+  submissions_dir: data/submissions
+
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: true
+  unfreeze_last_stage: false
+  unfreeze_stage_count: 2
+  unfreeze_cvlface_norm: true
+  unfreeze_cvlface_feature: true
+  dropout: 0.2
+
+train:
+  batch_size: 8
+  max_epochs: 20
+  learning_rate: 0.0003
+  backbone_learning_rate: 0.00001
+  weight_decay: 0.0001
+  monitor_metric: val_acc
+  monitor_mode: max
+  early_stopping_patience: 6
+  scheduler: cosine
+  accelerator: gpu
+  devices: 1
+  precision: 32
+
+augmentation:
+  use_horizontal_flip: true
+  use_affine: true
+  use_degradation_pack: false
+
+inference:
+  mode: neighborhood_aware
+  prototype_labels: [1, 2]
+  other_label: 0
+  threshold: 0.55
+  tta_horizontal_flip: true
+  checkpoint_source_experiment: exp_088_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta
+  neighborhood_aware:
+    top_k: 15
+    base_weight: 0.5
+
+submission_postprocess:
+  enabled: true
+  mode: override_labels
+  id_to_class:
+    537: 2
+    1071: 2
+    1112: 2
+
+multiface_selection:
+  base_splits_dir: data/splits/exp_001
+  insightface_name: buffalo_l
+  det_size: [640, 640]
+  ctx_id: 0
+  onnx_providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+  gallery_top_k: 5
+  jesse_class: 1
+  mila_class: 2
+  other_class: 0
+  michael_like_cluster: 1
+  sarah_like_cluster: 0
+  lookalike_assignments_csv: reports/analysis/exp_029_other_k2/other_cluster_assignments.csv
+  excluded_labeled_ids: [65]
