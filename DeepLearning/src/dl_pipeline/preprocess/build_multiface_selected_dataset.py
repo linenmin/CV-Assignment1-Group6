@@ -15,7 +15,11 @@ from dl_pipeline.inference.insightface_dual_verifier import (
     top_k_mean_cosine_similarity,
     youden_threshold,
 )
-from dl_pipeline.preprocess.multiface_selection import build_face_selection_rows, select_face_index_for_label
+from dl_pipeline.preprocess.multiface_selection import (
+    build_face_selection_rows,
+    select_face_index_for_label,
+    select_face_indices_for_label,
+)
 
 
 @dataclass
@@ -212,6 +216,8 @@ def build_multiface_selected_dataset(config: dict[str, Any]) -> SelectedFaceArti
         labeled_for_gallery, look_df, id_to_emb, selection_cfg
     )
     top_k = int(selection_cfg.get("gallery_top_k", 5))
+    other_label = int(selection_cfg.get("other_class", 0))
+    other_train_top_k = int(selection_cfg.get("other_train_top_k", 1))
 
     audit_rows: list[dict[str, Any]] = []
 
@@ -227,46 +233,59 @@ def build_multiface_selected_dataset(config: dict[str, Any]) -> SelectedFaceArti
             candidates = _extract_face_candidates(raw_bgr, app, face_align)
             score_rows = _score_candidates(candidates, jesse_gallery, mila_gallery, theta_jesse, theta_mila, top_k)
             label = int(row["class"]) if has_targets else None
-            selected_index = select_face_index_for_label(score_rows, label)
+            if has_targets and name == "train" and label == other_label:
+                selected_indices = select_face_indices_for_label(score_rows, label=label, max_faces=other_train_top_k)
+            else:
+                selected_index = select_face_index_for_label(score_rows, label)
+                selected_indices = [] if selected_index is None else [selected_index]
 
-            selection_source = "detect_align_selected"
-            selected_bgr = None
-            selected_row: dict[str, Any] | None = None
-            if selected_index is not None and candidates:
-                selected_bgr = candidates[selected_index]["aligned_bgr"]
-                selected_row = next(item for item in score_rows if int(item["face_index"]) == int(selected_index))
+            if selected_indices and candidates:
+                selected_payloads: list[tuple[int, np.ndarray, dict[str, Any], str]] = []
+                for selected_index in selected_indices:
+                    selected_row = next(item for item in score_rows if int(item["face_index"]) == int(selected_index))
+                    selected_payloads.append(
+                        (
+                            int(selected_index),
+                            candidates[selected_index]["aligned_bgr"],
+                            selected_row,
+                            "detect_align_selected",
+                        )
+                    )
             else:
                 fallback_bgr = _read_bgr(project_path(str(row["image_path"])))
                 if fallback_bgr is None:
                     raise FileNotFoundError(f"无法读取 fallback 裁剪图: {row['image_path']}")
-                selected_bgr = cv2.resize(fallback_bgr, (112, 112), interpolation=cv2.INTER_AREA)
-                selection_source = "crop_fallback"
+                selected_payloads = [(-1, cv2.resize(fallback_bgr, (112, 112), interpolation=cv2.INTER_AREA), None, "crop_fallback")]
 
-            out_path = out_dir / f"{sid}.png"
-            cv2.imwrite(str(out_path), selected_bgr)
-            record = {
-                "id": sid,
-                "image_path": _relative_project_path(out_path),
-                "source_path": str(row["source_path"]),
-            }
-            if has_targets:
-                record["class"] = int(row["class"])
-            out_records.append(record)
-
-            audit_rows.append(
-                {
-                    "split": name,
+            for rank, (selected_index, selected_bgr, selected_row, selection_source) in enumerate(selected_payloads):
+                filename = f"{sid}.png" if len(selected_payloads) == 1 else f"{sid}_sel{rank}.png"
+                out_path = out_dir / filename
+                cv2.imwrite(str(out_path), selected_bgr)
+                record = {
                     "id": sid,
-                    "label": int(row["class"]) if has_targets else None,
-                    "selection_source": selection_source,
-                    "num_faces_detected": int(len(candidates)),
-                    "selected_face_index": int(selected_index) if selected_index is not None else -1,
-                    "selected_score_jesse": float(selected_row["score_jesse"]) if selected_row else np.nan,
-                    "selected_score_mila": float(selected_row["score_mila"]) if selected_row else np.nan,
-                    "selected_excess_jesse": float(selected_row["excess_jesse"]) if selected_row else np.nan,
-                    "selected_excess_mila": float(selected_row["excess_mila"]) if selected_row else np.nan,
+                    "image_path": _relative_project_path(out_path),
+                    "source_path": str(row["source_path"]),
+                    "selection_rank": int(rank),
                 }
-            )
+                if has_targets:
+                    record["class"] = int(row["class"])
+                out_records.append(record)
+
+                audit_rows.append(
+                    {
+                        "split": name,
+                        "id": sid,
+                        "label": int(row["class"]) if has_targets else None,
+                        "selection_rank": int(rank),
+                        "selection_source": selection_source,
+                        "num_faces_detected": int(len(candidates)),
+                        "selected_face_index": int(selected_index),
+                        "selected_score_jesse": float(selected_row["score_jesse"]) if selected_row else np.nan,
+                        "selected_score_mila": float(selected_row["score_mila"]) if selected_row else np.nan,
+                        "selected_excess_jesse": float(selected_row["excess_jesse"]) if selected_row else np.nan,
+                        "selected_excess_mila": float(selected_row["excess_mila"]) if selected_row else np.nan,
+                    }
+                )
         return pd.DataFrame(out_records)
 
     processed_train = process_split("train", train_df, has_targets=True)

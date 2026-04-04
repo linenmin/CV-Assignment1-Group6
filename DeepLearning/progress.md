@@ -1528,3 +1528,110 @@
 - 结论更新：
   - 之前大量训练策略没有兑现，主因很可能不是 classifier 主体不行，而是长期使用了错误的人脸输入协议
   - 当前后续实验应默认基于 `multiface-selected` 输入继续推进，而不是回退到 `HAAR` 单脸训练线
+
+### Session 61
+
+- 执行 `exp_089`：
+  - 目标：在 `exp_088` 的输入协议和训练超参完全不变前提下，只扩展 train split 中 `class0` 的 hardest negative 采样
+  - 方案：`class0 top-k = 2`
+- 新增设计文档：
+  - `docs/plans/2026-04-04-exp089-class0-hard-negatives-design.md`
+- 代码改动：
+  - `src/dl_pipeline/preprocess/multiface_selection.py`
+  - `src/dl_pipeline/preprocess/build_multiface_selected_dataset.py`
+  - `tests/test_multiface_selection.py`
+  - `configs/experiments/exp_089_vit_adaface_multiface_selected_other_top2_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta.yaml`
+- 新数据集：
+  - processed dir：`data/processed/exp_089_multiface_selected_other_top2_faces_112`
+  - splits dir：`data/splits/exp_089_multiface_selected_other_top2`
+- 数据构建结果：
+  - train：`66`
+  - val：`16`
+  - test：`1816`
+  - 仅 3 个 `class0` 训练样本被展开为双负脸：
+    - `id=41`
+    - `id=59`
+    - `id=63`
+- 训练结果：
+  - `best_val_acc = 1.0`
+  - checkpoint：
+    - `outputs/exp_089_vit_adaface_multiface_selected_other_top2_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta/checkpoints/best.ckpt`
+- 推理结果：
+  - submission：
+    - `data/submissions/20260404_093907_exp_089_vit_adaface_multiface_selected_other_top2_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_submission.csv`
+  - 与 `exp_088` 按 `id` merge 后逐行比较：
+    - `num_diff = 0`
+    - 预测分布完全一致：
+      - `0: 941`
+      - `1: 451`
+      - `2: 424`
+- 结论：
+  - “给 `class0` 再多一张 hardest negative” 在当前 `exp_088` 主线上**没有改变最终测试预测**
+  - 因此这条方向至少在 `top-k=2` 的最小扩展版本上，**不是下一次突破点**
+
+### Session 62
+
+- 执行 `exp_090`：
+  - 目标：在 `exp_088` 输入协议完全不变前提下，只增强单体模型训练强度
+  - 方案：将 ViT 解冻深度从最后 `2` 个 block 提升到最后 `4` 个 block，并把 backbone LR 从 `1e-5` 降到 `5e-6`
+- 新增设计文档：
+  - `docs/plans/2026-04-04-exp090-stronger-finetune-design.md`
+- 新配置：
+  - `configs/experiments/exp_090_vit_adaface_multiface_selected_20ep_last4block_ce_neighborhoodaware_fixed055_hfliptta.yaml`
+- 训练结果：
+  - `best_val_acc = 1.0`
+  - checkpoint：
+    - `outputs/exp_090_vit_adaface_multiface_selected_20ep_last4block_ce_neighborhoodaware_fixed055_hfliptta/checkpoints/best.ckpt`
+- 推理结果：
+  - submission：
+    - `data/submissions/20260404_095346_exp_090_vit_adaface_multiface_selected_20ep_last4block_ce_neighborhoodaware_fixed055_hfliptta_submission.csv`
+  - 与 `exp_088` 按 `id` merge 后逐行比较：
+    - `num_diff = 0`
+    - 预测分布完全一致：
+      - `0: 941`
+      - `1: 451`
+      - `2: 424`
+- 结论：
+  - 在当前 `multiface-selected + CE + neighborhood-aware` 主线上，单纯把 ViT 从 `last2block` 加深到 `last4block`，**没有改变最终测试预测**
+  - 因此“继续加强单体模型训练强度”这个方向本身没错，但当前这一步具体实现**还没有碰到新的边界**
+
+### Session 63
+
+- 接受关于早停协议的批评并执行纠偏重跑：
+  - 问题：`val` 只有 `16` 张时，`val_acc` 很早饱和到 `1.0`，不适合作为冠军主线的 early stopping / checkpoint monitor
+  - 修正：把 monitor 从 `val_acc / max` 改为 `val_loss / min`，并把训练上限提升到 `50 epoch`
+- 新增设计文档：
+  - `docs/plans/2026-04-04-exp091-exp092-valloss-rerun-design.md`
+- 新配置：
+  - `configs/experiments/exp_091_vit_adaface_multiface_selected_50ep_last2block_ce_neighborhoodaware_fixed055_valloss_hfliptta.yaml`
+  - `configs/experiments/exp_092_vit_adaface_multiface_selected_50ep_last4block_ce_neighborhoodaware_fixed055_valloss_hfliptta.yaml`
+- `exp_091`：
+  - 目标：公平重跑 `exp_088`
+  - 最佳 `val_loss`：
+    - `0.0025814103428274393`
+  - checkpoint：
+    - `outputs/exp_091_vit_adaface_multiface_selected_50ep_last2block_ce_neighborhoodaware_fixed055_valloss_hfliptta/checkpoints/best.ckpt`
+  - submission：
+    - `data/submissions/20260404_100746_exp_091_vit_adaface_multiface_selected_50ep_last2block_ce_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+  - 与 `exp_088` 按 `id` merge 后逐行比较：
+    - `num_diff = 0`
+- `exp_092`：
+  - 目标：公平重跑 `exp_090`
+  - 最佳 `val_loss`：
+    - `0.003377359127625823`
+  - checkpoint：
+    - `outputs/exp_092_vit_adaface_multiface_selected_50ep_last4block_ce_neighborhoodaware_fixed055_valloss_hfliptta/checkpoints/best.ckpt`
+  - submission：
+    - `data/submissions/20260404_101330_exp_092_vit_adaface_multiface_selected_50ep_last4block_ce_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+  - 与 `exp_088` 按 `id` merge 后逐行比较：
+    - `num_diff = 0`
+- 共同观察：
+  - 两个实验都没有像旧版那样在不到 `10 epoch` 时停止
+  - 两者都继续训练到了接近 `50 epoch`
+  - `val_acc` 很早达到 `1.0`，但 `val_loss` 继续稳步下降
+- 结论修正：
+  - 对早停协议的批评是成立的，之前用 `val_acc` 监控确实不严谨
+  - 但在把协议修正到合理之后，`exp_088` 和 `exp_090` 的最终 test submission 仍然与旧版逐行一致
+  - 因此现在可以更有把握地保留两个实证结论：
+    - `exp_088` 这条冠军主线已经相当稳定
+    - `exp_090` 的 `last4block` stronger finetune 在当前输入协议下仍未改变最终边界

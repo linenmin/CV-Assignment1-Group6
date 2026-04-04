@@ -22,22 +22,44 @@ def build_face_selection_rows(
 
 
 def select_face_index_for_label(rows: list[dict[str, Any]], label: int | None) -> int | None:
-    if not rows:
+    indices = select_face_indices_for_label(rows, label=label, max_faces=1)
+    if not indices:
         return None
+    return int(indices[0])
+
+
+def select_face_indices_for_label(
+    rows: list[dict[str, Any]],
+    label: int | None,
+    max_faces: int = 1,
+) -> list[int]:
+    if not rows:
+        return []
+    max_faces = max(1, int(max_faces))
 
     if label == 1:
         best = max(rows, key=lambda row: (float(row["score_jesse"]), float(row["excess_jesse"])))
-        return int(best["face_index"])
+        return [int(best["face_index"])]
     if label == 2:
         best = max(rows, key=lambda row: (float(row["score_mila"]), float(row["excess_mila"])))
-        return int(best["face_index"])
+        return [int(best["face_index"])]
+    if label is None:
+        best = max(
+            rows,
+            key=lambda row: (
+                max(float(row["excess_jesse"]), float(row["excess_mila"])),
+                max(float(row["score_jesse"]), float(row["score_mila"])),
+            ),
+        )
+        return [int(best["face_index"])]
 
-    # other / unlabeled probe: pick the face with strongest target-like evidence.
-    best = max(
+    # other: sort by strongest target-like evidence and keep top-k negatives.
+    ranked = sorted(
         rows,
         key=lambda row: (
             max(float(row["excess_jesse"]), float(row["excess_mila"])),
             max(float(row["score_jesse"]), float(row["score_mila"])),
         ),
+        reverse=True,
     )
-    return int(best["face_index"])
+    return [int(row["face_index"]) for row in ranked[:max_faces]]
