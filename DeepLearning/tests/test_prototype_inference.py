@@ -17,6 +17,7 @@ from dl_pipeline.inference.prototype import (
     fuse_similarity_matrices,
     global_label_spread_predictions,
     neighborhood_aware_predictions,
+    neighborhood_aware_predictions_with_class_thresholds,
     neighborhood_aware_predictions_adaptive_threshold,
     pca_whiten_embedding_sets,
     predict_open_set_with_lookalikes,
@@ -36,6 +37,7 @@ from dl_pipeline.inference.prototype import (
     select_best_threshold_crossval,
     select_best_threshold,
     select_best_class_thresholds,
+    select_best_neighborhood_class_thresholds,
 )
 
 
@@ -102,6 +104,36 @@ class PrototypeInferenceTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(p_fix, p_ad))
         self.assertTrue(torch.allclose(eff, torch.full_like(eff, 0.55)))
+
+    def test_neighborhood_aware_predictions_with_class_thresholds_uses_predicted_class_threshold(self):
+        prototypes = {
+            1: torch.tensor([1.0, 0.0]),
+            2: torch.tensor([0.0, 1.0]),
+        }
+        query_embeddings = torch.tensor(
+            [
+                [0.95, 0.05],
+                [0.05, 0.95],
+                [0.60, 0.80],
+            ],
+            dtype=torch.float32,
+        )
+
+        predictions, base_scores, neighbor_scores, final_scores = neighborhood_aware_predictions_with_class_thresholds(
+            query_embeddings=query_embeddings,
+            prototypes=prototypes,
+            other_label=0,
+            thresholds_by_class={1: 0.90, 2: 0.55},
+            top_k=1,
+            base_weight=1.0,
+        )
+
+        self.assertEqual(predictions.tolist(), [1, 2, 2])
+        self.assertAlmostEqual(final_scores[2].item(), 0.80, places=5)
+        self.assertGreater(final_scores[2].item(), 0.55)
+        self.assertLess(final_scores[2].item(), 0.90)
+        self.assertTrue(torch.allclose(base_scores, final_scores))
+        self.assertEqual(neighbor_scores.shape, base_scores.shape)
 
     def test_cross_model_disagreement_resolve_adopts_secondary_when_primary_other(self):
         pred_v = torch.tensor([0, 1, 0, 2], dtype=torch.long)
@@ -650,6 +682,54 @@ class PrototypeInferenceTests(unittest.TestCase):
 
         self.assertEqual(thresholds, {1: 0.75, 2: 0.80})
         self.assertAlmostEqual(accuracy, 1.0)
+
+    def test_select_best_neighborhood_class_thresholds_matches_manual_search(self):
+        prototypes = {
+            1: torch.tensor([1.0, 0.0]),
+            2: torch.tensor([0.0, 1.0]),
+        }
+        val_embeddings = torch.tensor(
+            [
+                [0.95, 0.05],
+                [0.05, 0.95],
+                [0.62, 0.78],
+                [0.78, 0.62],
+            ],
+            dtype=torch.float32,
+        )
+        val_labels = torch.tensor([1, 2, 2, 0], dtype=torch.long)
+
+        thresholds, accuracy = select_best_neighborhood_class_thresholds(
+            val_embeddings=val_embeddings,
+            val_labels=val_labels,
+            prototypes=prototypes,
+            other_label=0,
+            threshold_values_by_class={
+                1: [0.70, 0.85],
+                2: [0.55, 0.80],
+            },
+            top_k=1,
+            base_weight=1.0,
+        )
+
+        expected_scores = {}
+        for threshold_1 in [0.70, 0.85]:
+            for threshold_2 in [0.55, 0.80]:
+                predictions, _, _, _ = neighborhood_aware_predictions_with_class_thresholds(
+                    query_embeddings=val_embeddings,
+                    prototypes=prototypes,
+                    other_label=0,
+                    thresholds_by_class={1: threshold_1, 2: threshold_2},
+                    top_k=1,
+                    base_weight=1.0,
+                )
+                expected_scores[(threshold_1, threshold_2)] = (
+                    predictions == val_labels
+                ).float().mean().item()
+
+        expected_combo = max(expected_scores, key=expected_scores.get)
+        self.assertEqual(thresholds, {1: expected_combo[0], 2: expected_combo[1]})
+        self.assertAlmostEqual(accuracy, expected_scores[expected_combo])
 
     def test_select_best_threshold_crossval_uses_mean_fold_accuracy(self):
         embeddings = torch.tensor(

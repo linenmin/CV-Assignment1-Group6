@@ -2022,6 +2022,921 @@ submission 对比：
 
 换句话说，这轮纠偏没有改写冠军是谁，但它显著提高了我们对当前主线判断的可信度。
 
+### `exp_093` 焦点错例 embedding 诊断（2026-04-04）
+
+在用户肉眼指出的一批明显“不是 `other` 却被判成 `0`”的 test 图上，额外做了 embedding 级别的 case audit。
+
+重点样本包括：
+
+- `48`
+- `289`
+- `361`
+- `543`
+- `612`
+- `699`
+- `1333`
+- `1525`
+
+诊断结果很一致：
+
+- 这些样本在最终分类器里并不是更像 `other`
+- 相反，它们都已经更偏向 `class2`
+- 其最近邻也主要由 `class2` 样本占据
+- 但最终 `final_score` 仍然只有大约 `0.25 ~ 0.34`
+
+这意味着：
+
+- 剩余问题不是“分类方向错了”
+- 而是“弱证据 target 样本虽然被看成更像 `class2`，但证据强度不足以越过 open-set 接受阈值”
+
+这条观察很重要，因为它直接排除了一个误判：
+
+- 当前系统不是把这批图当成了 `class1`
+- 也不是根本认不出 target direction
+- 它只是**保守地把弱证据 target 压回了 `0`**
+
+### `exp_094` / 全局阈值重标定（2026-04-04）
+
+由于当前冠军阈值 `0.55` 来自更早的脏输入时代，因此自然的怀疑是：
+
+- 阈值本身可能已经过时
+- 在正确输入协议下，最优全局阈值应该下降
+
+为此执行了 `exp_094`：
+
+- 输入协议：`exp_093 pad18 rescue`
+- 权重：复用 `exp_088`
+- 推理协议：仍是 `neighborhood_aware`
+- 仅新增全局阈值网格搜索
+
+结果：
+
+- 在当前正确输入协议下，验证集最优全局阈值确实下移到了 `0.48`
+- 这说明“旧阈值不是最优”这个怀疑并非空穴来风
+
+但是更关键的是：
+
+- 这版 submission 相对 `exp_088` 只改动了 `1` 张 test
+- 用户关心的 8 张高价值错例一张都没有修复
+
+因此：
+
+- 全局阈值重标定虽然改变了最佳阈值数值
+- 但**没有触及当前真正的残余误差核心**
+
+### `exp_095` / Neighborhood-Aware 类特异阈值（2026-04-04）
+
+为了进一步验证“是不是 `class2` 需要显著更低阈值”，又给 `neighborhood_aware` 主线补了 class-specific threshold 实验。
+
+结果是：
+
+- 自动搜索得到的最优组合为：
+  - `class1 = 0.48`
+  - `class2 = 0.49`
+- 即使允许分类别独立调阈值，`class2` 的最优阈值也没有被压到极低区域
+- 最终 submission 与 `exp_088` **逐行完全一致**
+
+这条结果很关键：
+
+- 它说明问题并不是“只要单独把 `class2` 阈值大幅降低就能解决”
+- 验证集本身并不支持那样激进的阈值策略
+- 因此当前那批 test 错例，并不是一个简单的 threshold calibration 问题
+
+### 当前最可信的工程判断
+
+现在的证据链已经很完整：
+
+1. `exp_093` 证明：输入协议还有一批 fallback / rescue 边缘样本值得关注
+2. embedding 诊断证明：高价值错例并非方向判错，而是 target 证据过弱
+3. `exp_094` 证明：全局阈值确实可以下移，但几乎不改变真正关键样本
+4. `exp_095` 证明：即使允许分类别调阈值，也没有改写 submission
+
+因此最合理的下一步不再是：
+
+- 继续细抠阈值
+- 继续做 submission 级规则修补
+
+而是：
+
+- 把 `exp_093` 这套当前真实推理输入协议固定下来
+- 在这套输入协议上重新训练主模型
+
+换句话说，**当前更像是训练分布与推理分布不一致的问题，而不是阈值没调好。**
+
+### `exp_096` / 在 `pad18 rescue` 输入协议上重训冠军主线（2026-04-04）
+
+为了验证“真正根因是不是训练分布与推理分布不一致”，执行了一个最干净的受控重训：
+
+- 训练 recipe 继承 `exp_091`
+- 输入协议切换到 `exp_093`
+- 也就是：
+  - `pad18 rescue multiface-selected`
+  - `50 epoch`
+  - `val_loss / min`
+  - `last2block`
+  - `CE + neighborhood_aware + hfliptta`
+
+这条实验的逻辑非常直接：
+
+- 如果当前剩余问题主要来自“模型没在新的 rescue 输入上训练过”
+- 那么把训练和推理协议重新对齐之后
+- 至少应当改写部分高价值 test 错例
+
+#### 实际结果
+
+- `exp_096` 训练收敛良好
+- 最佳 `val_loss = 0.001385191222652793`
+- 但最终 submission 与 `exp_088` **逐行完全一致**
+- 用户重点关注的 8 张高价值错例：
+  - `48, 289, 361, 543, 612, 699, 1333, 1525`
+  - 仍然全部保持为 `0`
+
+#### 这条结果的重要含义
+
+这轮结果的价值在于，它排除了一个非常自然、也非常合理的解释：
+
+- 不是说“模型只是没见过 rescue 输入，所以才在 test 上保守”
+
+因为现在已经让模型在 rescue 输入协议上完整重训了一轮，而 submission 仍然完全不变。
+
+这说明：
+
+- 训练/推理输入不一致，可能是问题的一部分
+- 但它**不是当前残余误差的决定性根因**
+
+也就是说，系统现在碰到的更像是：
+
+- 当前 backbone + 目标函数组合，在这批弱证据样本上确实给不出更强 target score
+- 不是简单靠“重新用正确输入训练一下”就能自动修复
+
+#### 因此主线判断再次收敛
+
+到这里，几个最自然的解释已经被依次排除：
+
+1. 只是阈值没调好：`exp_094 / exp_095` 否定
+2. 只是训练没用上新的 rescue 输入：`exp_096` 否定
+
+所以后续如果继续要冲分，更可能有效的方向将不再是：
+
+- 同构 recipe 再重训一遍
+- 或再抠阈值
+
+而是：
+
+- 修改训练目标本身
+- 或对 fallback / 弱证据 target 样本做专门增强
+
+### `exp_097` / 在修正后的输入协议上重新验证 CosFace（2026-04-04）
+
+在用户明确要求避免继续堆叠“冲榜型手工修补”之后，下一条最自然、也最适合写进报告的路线，是重新验证 margin-based loss。
+
+原因并不复杂：
+
+- 之前确实试过类似 `CosFace` 的方向
+- 但那一阶段的数据处理协议还没修正
+- 因此旧结果无法作为有效反证
+
+与此同时，当前系统的最终推理本来就依赖：
+
+- embedding 几何关系
+- prototype 相似度
+- open-set rejection threshold
+
+从方法论一致性上看，`CosFace` 这类 margin-based loss 理应比普通 `CE` 更匹配这套推理逻辑。因此执行了一条非常干净的受控实验：
+
+- 输入协议固定为 `exp_093`
+- 训练 recipe 继承 `exp_096`
+- 仅将 `loss` 从 `CE` 改为 `CosFace`
+
+#### 实验设置
+
+- 配置：
+  - `configs/experiments/exp_097_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_cosface_neighborhoodaware_fixed055_valloss_hfliptta.yaml`
+- 关键 loss 参数：
+  - `cosface_scale = 30.0`
+  - `cosface_margin = 0.35`
+- 其余保持不变：
+  - `pad18 rescue multiface-selected`
+  - `50 epoch`
+  - `val_loss / min`
+  - `last2block`
+  - `neighborhood_aware + hfliptta`
+
+#### 实际结果
+
+- `exp_097` 训练正常收敛
+- 最佳 `val_loss = 0.025193748995661736`
+- submission：
+  - `data/submissions/20260404_135527_exp_097_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_cosface_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+- 与 `exp_088` 比较：
+  - `num_diff = 0`
+- 与 `exp_096` 比较：
+  - `num_diff = 0`
+- 用户重点关注的 8 张高价值错例：
+  - `48, 289, 361, 543, 612, 699, 1333, 1525`
+  - 仍然全部保持为 `0`
+
+#### 这条结果说明了什么
+
+这轮实验的重要价值，不是“CosFace 分数没涨”这么简单，而是它进一步约束了后续可行解释。
+
+现在已经知道：
+
+- 不是简单阈值问题：`exp_094 / exp_095` 否定
+- 不是简单训练/推理输入不一致：`exp_096` 否定
+- 也不是简单把 `CE` 替换成 margin-based loss 就能自动修复：`exp_097` 否定
+
+结合用户对 `other` 类组成的判断，这条结果其实很有解释力：
+
+- `other` 并不是单一紧致类别
+- 它包含大量 `Michael / Sarah` 相似脸
+- 也夹杂少量其他人物与异常样本
+
+因此，在当前三类统一分类设定下，把这样一个**高度异质的 `other`** 也一并纳入 `CosFace` margin 训练，并没有自然带来更好的分离边界。至少在当前 recipe 下，这条路没有体现出收益。
+
+#### 阶段性结论
+
+到 `exp_097` 为止，一个非常重要的判断已经更稳定了：
+
+- 当前残余误差**不是靠“更标准一点的 loss”就能顺手解决**
+- 真正困难的部分，更可能来自：
+  - `other` 类内部结构本身高度异质
+  - 弱证据 target 与 lookalike other 的重叠区仍然过大
+
+因此后续如果继续推进，更值得探索的方向会是：
+
+- 更适配 open-set / heterogeneous-other 结构的训练目标
+- 或重新设计 `other` 的建模方式
+
+而不是继续在当前三类统一 margin 分类上做小幅超参微调。
+
+### `exp_098` / 对 CosFace 主线单独做阈值重标定（2026-04-04）
+
+在 `exp_097` 与 `exp_088 / exp_096` submission 完全一致之后，一个合理疑问是：
+
+- 会不会不是 `CosFace` 无效
+- 而是它的分数尺度已经变化
+- 只是沿用了 `CE` 时代的 `0.55` 阈值，因此没有显现出效果
+
+这个怀疑本身是成立的，所以补做了一轮**只改推理，不重训**的阈值搜索：
+
+- 配置：
+  - `configs/experiments/exp_098_vit_adaface_multiface_selected_pad18_rescue_cosface_neighborhoodaware_threshold_recalibrated_hfliptta.yaml`
+- checkpoint 直接复用：
+  - `exp_097`
+- 搜索区间：
+  - `0.20 ~ 0.55`
+
+#### 实际结果
+
+- 自动选中的最优阈值是：
+  - `selected_threshold = 0.25`
+- 验证集准确率：
+  - `val_accuracy = 1.0`
+
+这说明一个重要事实：
+
+**CosFace 的分数尺度确实和 CE 主线不同，阈值不能直接照搬 `0.55`。**
+
+但更关键的，是它放出来的 test 样本并不是当前已知最有价值的那一批：
+
+- 相对 `exp_097 / exp_088`，`exp_098` 只新增放出了 7 张：
+  - `211: 0 -> 1`
+  - `213: 0 -> 1`
+  - `420: 0 -> 2`
+  - `1455: 0 -> 2`
+  - `1540: 0 -> 2`
+  - `1542: 0 -> 2`
+  - `1777: 0 -> 2`
+
+而用户一直重点关注的 8 张高价值错例：
+
+- `48, 289, 361, 543, 612, 699, 1333, 1525`
+
+在 `exp_098` 中**仍然全部保持为 `0`**。
+
+#### 这条结果的含义
+
+`exp_098` 给出了一个很干净的结论：
+
+- `CosFace` 确实需要单独重标定阈值
+- 但即便完成了这一步，它释放出来的也不是当前最想修复的那批弱证据错例
+
+因此：
+
+- “`exp_097` 失败只是因为阈值没调”这个解释，已经基本可以排除
+- 后续不值得继续围绕 `CosFace` 做阈值微调或细小校准
+
+更值得推进的问题，已经进一步收敛到：
+
+- 不是单纯 score scale 的问题
+- 而是当前 `other` 的异质结构，与统一三类 margin 分类之间存在更深层不匹配
+
+### `exp_099` / 将训练任务改成 one-vs-rest，而不是三类 softmax（2026-04-04）
+
+在 `exp_097 / exp_098` 之后，下一步不能再简单理解为“换一个更好的 loss”。真正更关键的问题已经变成：
+
+- 为什么训练阶段还在把 `other` 当作一个单一类别
+- 而推理阶段其实早已把系统设计成了 target-only open-set recognition
+
+当前稳定推理主线的核心事实是：
+
+- prototype 只为 `class1 / class2` 构建
+- `other` 不存在 prototype
+- `other` 只是 rejection 结果
+
+这意味着训练目标与推理目标之间其实一直存在结构不一致：
+
+- 训练：三类 softmax，强迫 `other` 成为一个统一类别
+- 推理：两类 target prototype + open-set rejection
+
+在用户已经明确指出 `other` 内部高度异质之后，这种不一致就更值得被正面验证。因此设计了 `exp_099`：
+
+- 输入协议保持 `exp_093`
+- backbone 与 finetune 深度保持 `exp_096`
+- 推理保持完全不变
+- 仅改变训练任务定义：
+  - 新增 `bce_ovr`
+  - 训练两个 target logit：
+    - `is_class1`
+    - `is_class2`
+  - `other` 作为两个头的共同负样本补集
+
+这条实验的重要价值在于，它不是手工修补，也不是新的后处理规则，而是对任务形式本身做了更一致的建模。
+
+#### 实际结果
+
+- `best_val_loss = 0.0014043942792341113`
+- submission：
+  - `data/submissions/20260404_141936_exp_099_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_bceovr_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+- 相对：
+  - `exp_088`
+  - `exp_096`
+  - `exp_097`
+  - 都只有 **`1` 张差异**
+- 唯一变化样本：
+  - `id=1540: 0 -> 2`
+
+而用户一直关注的 8 张高价值错例：
+
+- `48, 289, 361, 543, 612, 699, 1333, 1525`
+
+仍然全部没有被救回。
+
+#### 为什么这条结果仍然重要
+
+虽然 `exp_099` 还没有带来大规模改写，但它和前面的实验有本质区别：
+
+- `exp_096`：同构重训，`num_diff = 0`
+- `exp_097`：换成 CosFace，`num_diff = 0`
+- `exp_099`：仅改变任务定义，`num_diff = 1`
+
+也就是说：
+
+**这是第一条在不改任何推理后处理的前提下，真正改写了 test 决策边界的训练实验。**
+
+这说明“训练任务定义”这条线，至少已经比：
+
+- 同构 CE 重训
+- 三类 CosFace
+
+更接近真正的瓶颈位置。
+
+#### 但当前还不能直接判定胜出
+
+原因也很清楚：
+
+- 目前它只动了 `1` 张
+- 而且这个样本 `id=1540` 早在 `exp_094` 中就作为高风险释放样本出现过
+- 所以仅凭 `exp_099` 当前固定 `0.55` 阈值的 submission，还不能直接判断这是稳定增益
+
+#### 当前最合理的下一步
+
+与 `exp_097` 类似，`exp_099` 的 score distribution 很可能已经变化：
+
+- `exp_099` 的 `mean_test_final_score` 明显高于 `CE` 主线
+- 但当前推理仍直接沿用了 `0.55`
+
+因此这条线最合理的下一步，不是立刻换方向，而是：
+
+- 对 `exp_099` 做一次自己的阈值重标定
+
+如果重标定后仍然只释放高风险非目标样本，那么可以进一步收敛为：
+
+- one-vs-rest 的任务定义虽然比三类 softmax 更合理
+- 但仍不足以修复那批最关键的弱证据 target 错例
+
+### `exp_100` / 对 one-vs-rest 主线做阈值重标定（2026-04-04）
+
+既然 `exp_099` 已经成为第一条真正改写 test 边界的训练实验，那么最自然的 follow-up 不是马上换方向，而是先回答一个简单问题：
+
+- `exp_099` 只改了 `1` 张
+- 会不会只是因为它仍然沿用了 `0.55`
+- 实际上这条 one-vs-rest 主线已经改变了 score distribution，只是还没配套重标定阈值
+
+因此执行了 `exp_100`：
+
+- 复用 `exp_099` checkpoint
+- 不重训
+- 仅对 `neighborhood_aware` 阈值做重新搜索
+
+#### 实际结果
+
+- 自动选中：
+  - `selected_threshold = 0.49`
+- 验证集：
+  - `val_accuracy = 1.0`
+
+这说明与 `CE` 主线相比，one-vs-rest 的最优阈值确实略有变化，但远不像 `CosFace` 那样发生大幅漂移。
+
+#### submission 变化
+
+相对 `exp_099`：
+
+- 只新增 `1` 张：
+  - `id=1455: 0 -> 2`
+
+相对 `exp_088`：
+
+- 总共 `2` 张变化：
+  - `1455: 0 -> 2`
+  - `1540: 0 -> 2`
+
+而用户最关注的 8 张核心错例：
+
+- `48, 289, 361, 543, 612, 699, 1333, 1525`
+
+在 `exp_100` 中依然**全部没有变化**。
+
+#### 这条结果怎么解读
+
+`exp_100` 的价值在于，它把 one-vs-rest 这条线再往前验证了一步：
+
+- 不是仅仅“训练端偶然抖动了 1 张”
+- 在配套阈值重标定后，它确实还能再放出 `1` 张 target-like 样本
+
+所以和 `exp_097 / exp_098` 相比，one-vs-rest 仍然是更有希望的方向。
+
+但同时，这条结果也非常清楚地表明：
+
+- 目前被释放出来的仍然只是少量边缘样本
+- 并没有命中当前最关键的高价值弱证据错例
+
+#### 阶段性结论
+
+到 `exp_100` 为止，可以更稳定地说：
+
+- 把训练任务从三类 softmax 改成 one-vs-rest，方向是**比 CosFace 更合理、也更有信号**的
+- 但在当前 backbone、当前数据量、当前推理协议下，它带来的改动仍然过小
+
+因此：
+
+- `exp_100` 还不足以支持提交
+- 后续如果继续推进，不应再停留在“纯阈值层面的 follow-up”
+- 而应考虑更进一步的训练目标或表征层改动
+
+### `exp_101` / 在 one-vs-rest 上加入 target-only supervised contrastive（2026-04-04）
+
+在 `exp_100` 之后，一个自然问题是：
+
+- 如果 one-vs-rest 的任务定义已经更合理
+- 但释放出来的仍只是少量边缘样本
+- 那是不是还需要一个更强的几何约束，直接把 target embedding 拉得更紧
+
+因此执行了 `exp_101`：
+
+- 主损失仍为 `BCE one-vs-rest`
+- 加入一个额外的 target-only supervised contrastive loss
+
+关键设计点是：
+
+- 只让 `class1 / class2` 形成正样本对
+- 不让 heterogeneous `other` 被错误地压成单一簇
+
+这比“三类一起做 contrastive”更符合任务结构，也比 `exp_097` 的三类 CosFace 更克制。
+
+#### 实际结果
+
+- `best_val_loss = 0.0781790018081665`
+- fixed `0.55` 推理下：
+  - `val_accuracy = 0.9375`
+- submission：
+  - `data/submissions/20260404_143800_exp_101_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_bceovr_supcon_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+
+与已有主线比较：
+
+- 相对 `exp_099`：
+  - `num_diff = 0`
+- 相对 `exp_100`：
+  - 少了 `id=1455: 2 -> 0`
+- 相对 `exp_088`：
+  - 仍然只保留 `id=1540: 0 -> 2`
+
+而用户最关心的 8 张核心错例：
+
+- `48, 289, 361, 543, 612, 699, 1333, 1525`
+
+仍然全部没有变化。
+
+#### 这条结果意味着什么
+
+这轮实验并不是“完全没信号”，而是给了一个更具体的结论：
+
+- 当前 `SupCon` 辅助项并没有把 one-vs-rest 主线往前推进
+- 反而在固定 `0.55` 阈值下，让验证边界比 `exp_099` 更不稳定
+
+也就是说：
+
+- 问题并不只是“再加一点 embedding 几何正则就会自然解决”
+- 至少在当前 batch size、当前数据量、当前 target-positive 稀疏度下，target-only `SupCon` 没有变成有效增益
+
+#### 阶段性收敛
+
+到 `exp_101` 为止，one-vs-rest 分支内部的相对表现已经比较清楚：
+
+- `exp_099`：最干净的 one-vs-rest 基线
+- `exp_100`：给 `exp_099` 做合理重标定后，最多释放 2 张边缘样本
+- `exp_101`：进一步加 target-only `SupCon` 后，没有超过 `exp_099/100`
+
+因此当前最稳的判断是：
+
+- `one-vs-rest` 方向本身是比三类 CE/CosFace 更接近问题结构的
+- 但当前加入的 `SupCon` 辅助项，还没有形成真正有效的推进
+
+### `exp_102` / 对 `bce_ovr + target-only SupCon` 分支做阈值重标定（2026-04-04）
+
+在 `exp_101` 完成后，最后还需要排除一个简单解释：
+
+- 会不会 `SupCon` 分支本身其实有用
+- 只是像 `exp_099` 一样，需要单独重标定阈值才能显现
+
+因此执行 `exp_102`：
+
+- 复用 `exp_101` checkpoint
+- 不重训
+- 只对 `neighborhood_aware` 阈值做完整搜索
+
+#### 实际结果
+
+- 自动选中的最优阈值仍然是：
+  - `selected_threshold = 0.55`
+- 验证集：
+  - `val_accuracy = 1.0`
+
+这点本身就很重要：
+
+- `exp_101` 并没有像 `exp_099` 或 `exp_097` 那样表现出明显的 score scale 漂移
+- 也就是说，这条 `SupCon` 分支不是“只是阈值还没调对”
+
+#### submission 变化
+
+相对 `exp_101`：
+
+- 新增 `1` 张：
+  - `id=1341: 0 -> 2`
+
+相对 `exp_100`：
+
+- 总量仍是 `2` 张，但释放对象发生互换：
+  - `exp_100`：
+    - `1455: 0 -> 2`
+    - `1540: 0 -> 2`
+  - `exp_102`：
+    - `1341: 0 -> 2`
+    - `1540: 0 -> 2`
+
+而最关键的是，用户长期关注的 8 张核心错例：
+
+- `48, 289, 361, 543, 612, 699, 1333, 1525`
+
+依然全部没有变化。
+
+#### 最终如何解读这条分支
+
+到这里，`exp_101 / exp_102` 已经可以完整定性：
+
+- target-only `SupCon` 并不是完全无效
+- 但它带来的变化只体现在少量边缘样本上，而且样本集合本身并不稳定
+- 它既没有超过 `exp_100`
+- 也没有接近触达当前最有价值的残余错例
+
+因此可以相当明确地收束为：
+
+- **`SupCon` 这条 follow-up 线可以停止**
+- 当前 one-vs-rest 主线里，最有参考价值的仍然是：
+  - `exp_099`
+  - `exp_100`
+
+而不是继续围绕 `SupCon` 做更多阈值或超参变体。
+
+### `exp_103` / `exp_088` 同构 recipe 的 full-train 79 样本验证（2026-04-04）
+
+用户提出了一个合理假设：
+
+- 目前 labeled 数据极少
+- 如果关键少数模态刚好只落在 `val`
+- 那么这些模式没有参与训练，可能就是 submission 长期卡住的原因
+
+因此执行一条非常干净的 finalization 风格实验：
+
+- 完全复用 `exp_088` 的 recipe
+- 不改 loss
+- 不改推理协议
+- 不改 threshold
+- 唯一改变：
+  - `use_full_train = true`
+  - 让原本的 `train=63` 与 `val=16` 合并成 `79` 张 labeled 样本共同训练
+
+#### 训练与推理语义确认
+
+先核对代码语义：
+
+- `FaceDataModule.setup()` 在 `use_full_train=true` 时会把 `train_df + val_df` 合并成新的 `train_dataset`
+- `train.py` 在 full-train 模式下不再使用 best-val checkpoint，而是保存 `last.ckpt`
+- `predict.py` 的 `neighborhood_aware` 默认 `gallery_source=train`
+  - 因此 full-train 时，prototype / neighborhood gallery 也会直接建立在合并后的 79 张 labeled 样本上
+
+也就是说，`exp_103` 不是“只把 val 用来训练头部”，而是：
+
+- **训练集**
+- **prototype**
+- **neighbor gallery**
+
+都一起切到了全量 labeled 版本。
+
+#### 实际结果
+
+`exp_103` 训练完成后：
+
+- fixed threshold 仍然是：
+  - `0.55`
+- `prototype_metrics.json`：
+  - `val_accuracy = 1.0`
+  - `mean_test_final_score = 0.5072612166404724`
+
+最关键的是 submission 对比：
+
+- 相对 `exp_088`：
+  - `num_diff = 0`
+
+也就是：
+
+- **full-train 79 张后，test submission 逐行完全不变**
+
+而用户长期追踪的 8 张核心错例：
+
+- `48, 289, 361, 543, 612, 699, 1333, 1525`
+
+也依然全部保持为 `0`。
+
+#### 这意味着什么
+
+这条实验对问题定位非常重要，因为它显著削弱了一个看起来很自然的解释：
+
+- “也许关键模态只在 val，没进训练，所以模型学不到”
+
+至少在当前最强 CE 主线及其同构推理协议下，这个解释**不足以成立**。  
+换句话说：
+
+- 把 val 样本并回训练
+- 让 prototype / neighbor gallery 也一并扩充
+
+仍然没有对 test 侧边界产生任何改变。
+
+因此后续如果继续做训练实验，不应再把重点放在：
+
+- “只是 train 样本数少了 16 张”
+
+而应放回更本质的问题上，例如：
+
+- 当前剩余错例是否属于这条 CE 边界根本不愿释放的弱证据区域
+- 是否需要继续沿 one-vs-rest 结构推进
+- 或者重新审视剩余 test 异常样本的真实性质
+
+### 当前正确协议下的 `buffalo` 与 `ViT + buffalo`（2026-04-04）
+
+在重新审视 `exp_085` 以后，一个关键事实被确认了：
+
+- 历史上证明“异构有效”的那条线
+- 其实建立在旧输入协议上
+
+具体来说：
+
+- `exp_067` 的 buffalo 单模，仍挂在 `exp_001/haar`
+- `exp_086` 的多脸 buffalo，也仍挂在 `exp_001/haar`
+- `exp_085` 的 `ViT + buffalo` rescue-only 融合，底座是：
+  - `exp_061`
+  - `exp_067`
+
+因此此前得到的结论最多只能说明：
+
+- **旧协议下，异构信号曾经有效**
+
+却不能说明：
+
+- **当前修正后的 `exp_093` 协议下，异构信号仍然有效**
+
+于是这一块被重新拆成三条实验：
+
+#### 1. `exp_104`：当前协议下的多脸 max-pool buffalo standalone
+
+这条实验把 `exp_086` 的多脸 `buffalo_l` max-pool dual verifier，直接迁移到：
+
+- `processed_dir = data/processed/exp_093_multiface_selected_pad18_rescue_faces_112`
+- `splits_dir = data/splits/exp_093_multiface_selected_pad18_rescue`
+
+也就是让：
+
+- labeled gallery
+- test crop fallback
+- raw `source_path`
+
+全部切到当前正确协议。
+
+**结果：**
+
+- 相对 `exp_088 / exp_093`
+  - `num_diff = 23`
+- 且所有变化都是：
+  - `1 -> 0`
+  - `2 -> 0`
+
+没有任何：
+
+- `0 -> 1`
+- `0 -> 2`
+
+而用户长期关注的 8 张核心错例：
+
+- `48, 289, 361, 543, 612, 699, 1333, 1525`
+
+在 `exp_104` 中全部仍然是 `0`。
+
+这说明：
+
+- **当前协议下，多脸 max-pool buffalo 单模没有提供可用 rescue 信号**
+- 它只是一个更保守的拒识器
+
+#### 2. `exp_106`：当前协议下的单脸 buffalo standalone
+
+为了进一步隔离 effect，又把 `exp_067` 风格的单脸 dual verifier，也迁移到了同样的 `exp_093` 协议上。
+
+**结果：**
+
+- 相对 `exp_088`
+  - `num_diff = 132`
+- 变化是混合的：
+  - 很多 `1/2 -> 0`
+  - 也出现了：
+    - `0 -> 1: 13`
+    - `0 -> 2: 12`
+  - 甚至还有：
+    - `1 -> 2`
+    - `2 -> 1`
+
+这说明：
+
+- **当前协议下，单脸 buffalo 并没有死掉**
+- 它确实保留了与 `ViT` 不同的判别信号
+
+但同时也说明：
+
+- 这个单模太“躁”
+- 边界变化过大
+- 本身不是一个稳妥 submission 候选
+
+#### 3. `exp_105`：当前协议下的 `exp_093 + buffalo` rescue-only 异构融合
+
+最后重新跑一条 `exp_085` 风格的 rescue-only 异构融合：
+
+- primary：`exp_093`
+- secondary：当前协议下的 buffalo 分数
+
+**结果：**
+
+- 相对 `exp_088 / exp_093`
+  - `num_diff = 25`
+- 且全部都是：
+  - `0 -> 1: 13`
+  - `0 -> 2: 12`
+
+也就是说：
+
+- 它不是对 anchor 做对称扰动
+- 而是真正执行了“只在 anchor 判 `other` 时做 rescue”
+
+并且在 8 张核心错例中：
+
+- `48: 0 -> 1`
+
+被成功救出；
+
+其余：
+
+- `289, 361, 543, 612, 699, 1333, 1525`
+
+仍未改变。
+
+#### 最重要的技术结论
+
+这三条实验合起来给出一个非常清楚的结论：
+
+- 当前协议下，`buffalo` **不是完全无效**
+- 但它的有效信号主要来自：
+  - **单脸 dual verifier 分数**
+- 而不是来自：
+  - **多脸 max-pool standalone submission**
+
+换句话说：
+
+- `exp_104` 的 standalone 多脸 buffalo 不值得继续
+- `exp_106` 的 standalone 单脸 buffalo 说明异构信号还在，但单模太激进
+- **真正值得关注的是 `exp_105` 这种以 `ViT` 为强锚点、只做 rescue 的异构融合**
+
+#### 但这条线的风险也非常高
+
+`exp_105` 同时暴露出一个明显风险：
+
+- 在 labeled LOO 上：
+  - `labeled_loo_rescue_subset_size = 0`
+- 但在 test 上：
+  - `test_rescue_subset_size = 25`
+
+这意味着：
+
+- 这条融合规则在 train+val 上没有任何样本真正触发 rescue
+- 但在 test 上却突然放出了 25 张 `0 -> 1/2`
+
+因此它虽然带来了真实的新信号，却也是一种**明显的 test-only 外推**。  
+从方法论角度，它可以作为：
+
+- 一个值得提交一次验证的高风险候选
+
+但不能被解释成：
+
+- 已经被 labeled evidence 稳定支撑的安全改进
+
+#### Public score 补记
+
+- `exp_105 = 0.97026`
+- `exp_106 = 0.92676`
+
+这进一步确认：
+
+- 当前协议下的 `ViT + buffalo rescue-only`
+  - 是明显的 test-only 外推
+- 当前协议下的单脸 `buffalo` standalone
+  - 有异构信号
+  - 但不是稳定主线
+
+#### `shadow probe` 监控实验：`exp_108`
+
+为了直接回答一个关键问题：
+
+- 这 8 张核心错例
+  - `48, 289, 361, 543, 612, 699, 1333, 1525`
+- 会不会在某些 epoch 其实已经被模型学会
+- 只是因为早停 / epoch 选择不对而被错过
+
+增加了一条训练期旁路监控：
+
+- 不改正式 `val` / early stopping
+- 每个 epoch 额外对这 8 张 test 图按**正式 open-set 推理逻辑**
+  - 导出 `argmax_label`
+  - `pred_config_threshold`
+  - `pred_val_selected_threshold`
+  - `base_score / neighbor_score / final_score`
+  - `selected_threshold`
+
+技术上先做了 `exp_107`，随后发现 callback 留在 `eval()` 的 bug，修复后重新以 `exp_108` 跑干净结果。
+
+`exp_108` 的结论非常稳定：
+
+- 8 张图在全部 9 个 epoch 中
+  - `argmax_label` 始终都是 `2`
+- 说明模型从头到尾都把它们看得更像 `class2`
+- 但 `final_score` 始终只有约 `0.26 ~ 0.35`
+- 每个 epoch 在 val 上自动选出的最优阈值都固定为 `0.50`
+- 即使按这个更宽的 `0.50`
+  - 这 8 张里也没有任何一张曾经被接受
+
+这说明：
+
+- 问题**不是**
+  - 某个 epoch 已经学会了这 8 张
+  - 后来又被过拟合/早停抹掉
+- 问题是
+  - 它们在整个训练过程中一直只是**弱证据 `class2`**
+  - 从来没有进入可接受区
+
+因此可以明确排除一条常见解释：
+
+- 不值得继续围绕
+  - `early stopping`
+  - `epoch 选择`
+  - “把这 8 张当 val”
+ 这条线追加实验
+
 ### `exp_048` / neighborhood 参数网格（2026-04-02）
 
 - 已运行 `scripts/sweep_neighborhood_aware.py`（`gpu_env`），在固定 `exp_047` 协议（`threshold=0.55`、TTA、train+val prototype）下扫描 `top_k ∈ {5,10,15,20,30}` 与 `base_weight ∈ {0.3,0.4,0.5,0.6,0.7}`。

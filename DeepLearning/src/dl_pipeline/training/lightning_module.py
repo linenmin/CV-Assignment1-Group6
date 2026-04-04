@@ -39,6 +39,9 @@ class FaceClassifierModule(L.LightningModule):
         cosface_scale: float = 30.0,
         cosface_margin: float = 0.35,
         label_smoothing: float = 0.0,
+        ovr_threshold: float = 0.5,
+        supcon_weight: float = 0.0,
+        supcon_temperature: float = 0.1,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -62,6 +65,9 @@ class FaceClassifierModule(L.LightningModule):
         self.loss_target_label_to_index = {
             int(label): index for index, label in enumerate(self.loss_target_labels)
         }
+        self.ovr_threshold = float(ovr_threshold)
+        self.supcon_weight = float(supcon_weight)
+        self.supcon_temperature = float(supcon_temperature)
 
         if self.loss_name == "triplet":
             self.criterion = nn.TripletMarginLoss(margin=0.5, p=2)
@@ -90,6 +96,13 @@ class FaceClassifierModule(L.LightningModule):
             self.val_acc = MulticlassAccuracy(num_classes=num_classes)
             self.val_f1 = MulticlassF1Score(num_classes=num_classes, average="macro")
             self.criterion = nn.CrossEntropyLoss()
+        elif self.loss_name in {"bce_ovr", "bce_ovr_supcon"}:
+            if len(self.loss_target_labels) < 2:
+                raise ValueError("bce_ovr 模式至少需要两个 target labels。")
+            self.ovr_head = nn.Linear(self._resolve_feature_dim(), len(self.loss_target_labels))
+            self.val_acc = MulticlassAccuracy(num_classes=num_classes)
+            self.val_f1 = MulticlassF1Score(num_classes=num_classes, average="macro")
+            self.criterion = nn.BCEWithLogitsLoss()
         else:
             ls = float(label_smoothing)
             self.criterion = (
@@ -150,6 +163,63 @@ class FaceClassifierModule(L.LightningModule):
 
         return torch.cat(selected_feature_list, dim=0), torch.cat(selected_label_list, dim=0)
 
+    def _build_ovr_targets(self, labels: torch.Tensor) -> torch.Tensor:
+        target_matrix = torch.zeros(
+            (int(labels.shape[0]), len(self.loss_target_labels)),
+            device=labels.device,
+            dtype=torch.float32,
+        )
+        for raw_label, mapped_label in self.loss_target_label_to_index.items():
+            target_matrix[labels == raw_label, mapped_label] = 1.0
+        return target_matrix
+
+    def _decode_ovr_predictions(self, logits: torch.Tensor) -> torch.Tensor:
+        probabilities = torch.sigmoid(logits)
+        best_scores, best_indices = probabilities.max(dim=1)
+        mapped_labels = torch.tensor(
+            self.loss_target_labels,
+            device=logits.device,
+            dtype=torch.long,
+        )[best_indices]
+        predictions = torch.zeros_like(best_indices, dtype=torch.long)
+        accept_mask = best_scores >= self.ovr_threshold
+        predictions[accept_mask] = mapped_labels[accept_mask]
+        return predictions
+
+    def _compute_target_only_supcon_loss(
+        self,
+        features: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.supcon_weight <= 0.0:
+            return features.sum() * 0.0
+
+        target_mask = torch.zeros_like(labels, dtype=torch.bool)
+        for raw_label in self.loss_target_labels:
+            target_mask |= labels == int(raw_label)
+
+        if int(target_mask.sum().item()) < 2:
+            return features.sum() * 0.0
+
+        target_features = torch.nn.functional.normalize(features[target_mask], p=2, dim=1)
+        target_labels = labels[target_mask]
+
+        pair_mask = target_labels.unsqueeze(0) == target_labels.unsqueeze(1)
+        pair_mask.fill_diagonal_(False)
+        positive_counts = pair_mask.sum(dim=1)
+        valid_anchor_mask = positive_counts > 0
+        if not valid_anchor_mask.any():
+            return features.sum() * 0.0
+
+        logits = torch.matmul(target_features, target_features.T) / self.supcon_temperature
+        logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+        self_mask = torch.eye(logits.shape[0], device=logits.device, dtype=torch.bool)
+        logits = logits.masked_fill(self_mask, float("-inf"))
+
+        log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+        mean_log_prob_pos = (log_prob.masked_fill(~pair_mask, 0.0).sum(dim=1) / positive_counts.clamp_min(1))
+        return -mean_log_prob_pos[valid_anchor_mask].mean()
+
     def _compute_loss_and_predictions(
         self,
         images: torch.Tensor,
@@ -162,6 +232,16 @@ class FaceClassifierModule(L.LightningModule):
             # 指标与推理一致：argmax 用无 margin 的余弦 logits，避免低估 val_acc
             logits_infer = self.cosface_head(features, None)
             preds = torch.argmax(logits_infer, dim=1)
+            return loss, preds, labels, int(labels.shape[0])
+
+        if self.loss_name in {"bce_ovr", "bce_ovr_supcon"}:
+            features = self.extract_features(images)
+            logits = self.ovr_head(features)
+            targets = self._build_ovr_targets(labels)
+            loss = self.criterion(logits, targets)
+            if self.loss_name == "bce_ovr_supcon":
+                loss = loss + self.supcon_weight * self._compute_target_only_supcon_loss(features, labels)
+            preds = self._decode_ovr_predictions(logits)
             return loss, preds, labels, int(labels.shape[0])
 
         if self.loss_name != "arcface":

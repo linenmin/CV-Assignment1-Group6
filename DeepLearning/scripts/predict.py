@@ -36,6 +36,7 @@ from dl_pipeline.inference.prototype import (
     predict_open_set_with_class_thresholds,
     global_label_spread_predictions,
     neighborhood_aware_predictions,
+    neighborhood_aware_predictions_with_class_thresholds,
     neighborhood_aware_predictions_adaptive_threshold,
     neighborhood_score_fusion_predictions,
     pca_whiten_embedding_sets,
@@ -47,6 +48,7 @@ from dl_pipeline.inference.prototype import (
     select_best_threshold_crossval,
     select_best_threshold,
     select_best_neighborhood_threshold,
+    select_best_neighborhood_class_thresholds,
     spectral_cluster_with_gallery_label_matching,
 )
 from dl_pipeline.inference.svm import train_and_predict_svm
@@ -103,6 +105,9 @@ def _load_model_from_checkpoint(config, checkpoint_path: str):
         cosface_scale=loss_config.get("cosface_scale", loss_config.get("arcface_scale", 30.0)),
         cosface_margin=loss_config.get("cosface_margin", 0.35),
         label_smoothing=float(loss_config.get("label_smoothing", 0.0)),
+        ovr_threshold=float(loss_config.get("ovr_threshold", 0.5)),
+        supcon_weight=float(loss_config.get("supcon_weight", 0.0)),
+        supcon_temperature=float(loss_config.get("supcon_temperature", 0.1)),
     )
 
 
@@ -1383,12 +1388,14 @@ def _run_neighborhood_aware_inference(config, datamodule, model, test_df, output
     prototype_labels = inference_config.get("prototype_labels", [1, 2])
     other_label = inference_config.get("other_label", 0)
     threshold_values = inference_config.get("threshold_values")
+    threshold_values_by_class = inference_config.get("threshold_values_by_class")
     threshold = float(inference_config.get("threshold", 0.55))
     use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
     neighborhood_config = inference_config.get("neighborhood_aware", {})
     top_k = neighborhood_config.get("top_k", 15)
     base_weight = neighborhood_config.get("base_weight", 0.5)
     threshold_search_details: list[dict[str, float]] | None = None
+    thresholds_by_class: dict[int, float] | None = None
 
     device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
     model = model.to(device)
@@ -1427,16 +1434,39 @@ def _run_neighborhood_aware_inference(config, datamodule, model, test_df, output
             top_k=int(top_k),
             base_weight=float(base_weight),
         )
+    elif threshold_values_by_class:
+        normalized_threshold_values_by_class = {
+            int(label): list(values) for label, values in threshold_values_by_class.items()
+        }
+        thresholds_by_class, val_accuracy = select_best_neighborhood_class_thresholds(
+            val_embeddings=val_embeddings,
+            val_labels=val_labels,
+            prototypes=prototypes,
+            other_label=other_label,
+            threshold_values_by_class=normalized_threshold_values_by_class,
+            top_k=int(top_k),
+            base_weight=float(base_weight),
+        )
 
-    val_predictions, val_base_scores, val_neighbor_scores, val_final_scores = neighborhood_aware_predictions(
-        query_embeddings=val_embeddings,
-        prototypes=prototypes,
-        other_label=other_label,
-        threshold=float(threshold),
-        top_k=top_k,
-        base_weight=base_weight,
-    )
-    if not threshold_values:
+    if thresholds_by_class:
+        val_predictions, val_base_scores, val_neighbor_scores, val_final_scores = neighborhood_aware_predictions_with_class_thresholds(
+            query_embeddings=val_embeddings,
+            prototypes=prototypes,
+            other_label=other_label,
+            thresholds_by_class=thresholds_by_class,
+            top_k=top_k,
+            base_weight=base_weight,
+        )
+    else:
+        val_predictions, val_base_scores, val_neighbor_scores, val_final_scores = neighborhood_aware_predictions(
+            query_embeddings=val_embeddings,
+            prototypes=prototypes,
+            other_label=other_label,
+            threshold=float(threshold),
+            top_k=top_k,
+            base_weight=base_weight,
+        )
+    if not threshold_values and not threshold_values_by_class:
         val_accuracy = (val_predictions == val_labels).float().mean().item()
 
     all_gallery_embeddings, all_gallery_labels = combine_embedding_sets(
@@ -1450,21 +1480,32 @@ def _run_neighborhood_aware_inference(config, datamodule, model, test_df, output
         all_gallery_labels,
         prototype_labels=prototype_labels,
     )
-    test_predictions, test_base_scores, test_neighbor_scores, test_final_scores = neighborhood_aware_predictions(
-        query_embeddings=test_embeddings,
-        prototypes=final_prototypes,
-        other_label=other_label,
-        threshold=threshold,
-        top_k=top_k,
-        base_weight=base_weight,
-    )
+    if thresholds_by_class:
+        test_predictions, test_base_scores, test_neighbor_scores, test_final_scores = neighborhood_aware_predictions_with_class_thresholds(
+            query_embeddings=test_embeddings,
+            prototypes=final_prototypes,
+            other_label=other_label,
+            thresholds_by_class=thresholds_by_class,
+            top_k=top_k,
+            base_weight=base_weight,
+        )
+    else:
+        test_predictions, test_base_scores, test_neighbor_scores, test_final_scores = neighborhood_aware_predictions(
+            query_embeddings=test_embeddings,
+            prototypes=final_prototypes,
+            other_label=other_label,
+            threshold=threshold,
+            top_k=top_k,
+            base_weight=base_weight,
+        )
 
     metrics = {
         "mode": "neighborhood_aware",
         "prototype_labels": prototype_labels,
         "other_label": other_label,
         "tta_horizontal_flip": use_horizontal_flip_tta,
-        "selected_threshold": float(threshold),
+        "selected_threshold": None if thresholds_by_class else float(threshold),
+        "selected_thresholds_by_class": thresholds_by_class,
         "val_accuracy": float(val_accuracy),
         "threshold_search": threshold_search_details,
         "neighborhood_aware": {
@@ -2473,6 +2514,9 @@ def main() -> None:
             cosface_scale=loss_config.get("cosface_scale", loss_config.get("arcface_scale", 30.0)),
             cosface_margin=loss_config.get("cosface_margin", 0.35),
             label_smoothing=float(loss_config.get("label_smoothing", 0.0)),
+            ovr_threshold=float(loss_config.get("ovr_threshold", 0.5)),
+            supcon_weight=float(loss_config.get("supcon_weight", 0.0)),
+            supcon_temperature=float(loss_config.get("supcon_temperature", 0.1)),
         )
 
     trainer = L.Trainer(

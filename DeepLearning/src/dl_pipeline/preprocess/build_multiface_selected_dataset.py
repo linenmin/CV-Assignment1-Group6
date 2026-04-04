@@ -34,7 +34,7 @@ class SelectedFaceArtifacts:
 
 def _load_raw_bgr(npy_path: Path) -> np.ndarray:
     arr = np.load(str(npy_path), allow_pickle=False)
-    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    return arr
 
 
 def _read_bgr(image_path: Path) -> np.ndarray | None:
@@ -77,6 +77,50 @@ def _embed_direct_arcface(rec_model, bgr: np.ndarray) -> np.ndarray:
     img112 = cv2.resize(bgr, (112, 112))
     raw = rec_model.get_feat(img112)
     return _l2_normalize(raw)
+
+
+def _pad_replicate(image_bgr: np.ndarray, pad_fraction: float) -> np.ndarray:
+    h, w = image_bgr.shape[:2]
+    pad = max(8, int(round(max(h, w) * float(pad_fraction))))
+    return cv2.copyMakeBorder(
+        image_bgr,
+        pad,
+        pad,
+        pad,
+        pad,
+        cv2.BORDER_REPLICATE,
+    )
+
+
+def _build_rescue_views(raw_bgr: np.ndarray, rescue_pad_fractions: list[float]) -> list[tuple[str, np.ndarray]]:
+    views: list[tuple[str, np.ndarray]] = []
+    seen_labels: set[str] = set()
+    for fraction in rescue_pad_fractions:
+        frac = float(fraction)
+        if frac <= 0.0:
+            continue
+        label = f"detect_align_rescue_pad{int(round(frac * 100)):02d}"
+        if label in seen_labels:
+            continue
+        views.append((label, _pad_replicate(raw_bgr, frac)))
+        seen_labels.add(label)
+    return views
+
+
+def _detect_faces_with_optional_rescue(
+    raw_bgr: np.ndarray,
+    app,
+    rescue_pad_fractions: list[float],
+) -> tuple[list[Any], np.ndarray, str]:
+    faces = app.get(raw_bgr)
+    if faces:
+        return list(faces), raw_bgr, "detect_align_selected"
+
+    for source, candidate_bgr in _build_rescue_views(raw_bgr, rescue_pad_fractions):
+        faces = app.get(candidate_bgr)
+        if faces:
+            return list(faces), candidate_bgr, source
+    return [], raw_bgr, "missing"
 
 
 def _collect_single_embeddings(
@@ -158,11 +202,16 @@ def _calibrate_dual_verifier(
     return jesse_gallery, mila_gallery, float(theta_jesse), float(theta_mila)
 
 
-def _extract_face_candidates(raw_bgr: np.ndarray, app, face_align) -> list[dict[str, Any]]:
-    faces = app.get(raw_bgr)
+def _extract_face_candidates(
+    raw_bgr: np.ndarray,
+    app,
+    face_align,
+    rescue_pad_fractions: list[float],
+) -> tuple[list[dict[str, Any]], str]:
+    faces, detect_bgr, detect_source = _detect_faces_with_optional_rescue(raw_bgr, app, rescue_pad_fractions)
     candidates: list[dict[str, Any]] = []
     for idx, face in enumerate(faces):
-        aligned = face_align.norm_crop(raw_bgr, landmark=face.kps, image_size=112)
+        aligned = face_align.norm_crop(detect_bgr, landmark=face.kps, image_size=112)
         candidates.append(
             {
                 "face_index": int(idx),
@@ -170,7 +219,7 @@ def _extract_face_candidates(raw_bgr: np.ndarray, app, face_align) -> list[dict[
                 "aligned_bgr": aligned,
             }
         )
-    return candidates
+    return candidates, detect_source
 
 
 def _score_candidates(
@@ -218,6 +267,7 @@ def build_multiface_selected_dataset(config: dict[str, Any]) -> SelectedFaceArti
     top_k = int(selection_cfg.get("gallery_top_k", 5))
     other_label = int(selection_cfg.get("other_class", 0))
     other_train_top_k = int(selection_cfg.get("other_train_top_k", 1))
+    rescue_pad_fractions = [float(v) for v in selection_cfg.get("rescue_pad_fractions", [])]
 
     audit_rows: list[dict[str, Any]] = []
 
@@ -230,7 +280,7 @@ def build_multiface_selected_dataset(config: dict[str, Any]) -> SelectedFaceArti
                 continue
 
             raw_bgr = _load_raw_bgr(project_path(str(row["source_path"])))
-            candidates = _extract_face_candidates(raw_bgr, app, face_align)
+            candidates, detect_source = _extract_face_candidates(raw_bgr, app, face_align, rescue_pad_fractions)
             score_rows = _score_candidates(candidates, jesse_gallery, mila_gallery, theta_jesse, theta_mila, top_k)
             label = int(row["class"]) if has_targets else None
             if has_targets and name == "train" and label == other_label:
@@ -248,7 +298,7 @@ def build_multiface_selected_dataset(config: dict[str, Any]) -> SelectedFaceArti
                             int(selected_index),
                             candidates[selected_index]["aligned_bgr"],
                             selected_row,
-                            "detect_align_selected",
+                            detect_source,
                         )
                     )
             else:

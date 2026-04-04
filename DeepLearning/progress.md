@@ -1635,3 +1635,468 @@
   - 因此现在可以更有把握地保留两个实证结论：
     - `exp_088` 这条冠军主线已经相当稳定
     - `exp_090` 的 `last4block` stronger finetune 在当前输入协议下仍未改变最终边界
+
+### Session 64
+
+- 新增诊断脚本与辅助模块：
+  - `scripts/export_case_embedding_diagnostics.py`
+  - `src/dl_pipeline/evaluation/case_diagnostics.py`
+  - `tests/test_case_diagnostics.py`
+- 对用户肉眼指出的 8 张 `exp_088` fallback 错例做 embedding 级诊断：
+  - `48`
+  - `289`
+  - `361`
+  - `543`
+  - `612`
+  - `699`
+  - `1333`
+  - `1525`
+- 诊断输出：
+  - `data/visualizations/case_embedding_diagnostics/exp_093_focus_cases/summary.csv`
+  - `data/visualizations/case_embedding_diagnostics/exp_093_focus_cases/neighbors.csv`
+  - `data/visualizations/case_embedding_diagnostics/exp_093_focus_cases/images/`
+- 关键结论：
+  - 这 8 张并不是“方向判错了”
+  - 它们在最终分类器里**全部更偏向 `class2`**
+  - 但 `final_score` 仅约 `0.25 ~ 0.34`，显著低于当前 `0.55` 阈值，因此最终被拒成 `0`
+  - 说明剩余问题的本质不是“分到 wrong identity”，而是“弱证据 target 被 open-set 拒绝”
+
+### Session 65
+
+- 围绕“旧阈值是在错误输入协议时代调出来的”这一假设，执行两轮纯推理侧受控实验。
+- `exp_094`：
+  - 配置：
+    - `configs/experiments/exp_094_vit_adaface_multiface_selected_pad18_rescue_neighborhoodaware_threshold_recalibrated_hfliptta.yaml`
+  - 方案：
+    - 使用 `exp_093` 的 rescue 输入协议
+    - 复用 `exp_088` checkpoint
+    - 在 `neighborhood_aware` 主线上重扫全局阈值 `0.20 ~ 0.55`
+  - 结果：
+    - 自动选中 `selected_threshold = 0.48`
+    - val 仍为 `1.0`
+    - 与 `exp_088` 相比仅改动 `1` 张 test：`id=1540, 0->2`
+    - 用户重点指出的 8 张错误样本**一张都没有被救回**
+- `exp_095`：
+  - 配置：
+    - `configs/experiments/exp_095_vit_adaface_multiface_selected_pad18_rescue_neighborhoodaware_classspecific_thresholds_hfliptta.yaml`
+  - 代码支持：
+    - 为 `neighborhood_aware` 主线补入 class-specific threshold 搜索与推理分支
+  - 结果：
+    - 自动选中 `class1=0.48, class2=0.49`
+    - 与 `exp_088` submission **逐行完全一致，`num_diff = 0`**
+- 结论：
+  - “旧阈值不对”这个判断不是空想，但它**不是当前主瓶颈**
+  - 仅靠阈值重标定，无法修复那批真正高价值的弱证据错例
+
+### Session 66
+
+- 基于 `exp_094/095` 的结果，主线判断收敛：
+  - 后处理式阈值修补无法根治当前残余错误
+  - 更可能的根因是：
+    - 当前模型尚未在 `exp_093` 这套 `pad18 rescue` 输入协议上重新训练过
+    - 训练分布与当前推理分布仍不一致
+- 决定启动下一主实验：
+  - `exp_096 = exp_091 training recipe + exp_093 input protocol`
+  - 即：
+    - `pad18 rescue multiface-selected` 输入
+    - `50 epoch`
+    - `val_loss / min`
+    - `last2block`
+    - `CE + neighborhood_aware + hfliptta`
+- 该实验的目标不是继续修补阈值，而是验证：
+  - 在当前真实推理输入协议上重训之后，弱证据 `class2` 是否能被整体抬分
+
+### Session 67
+
+- 执行 `exp_096`：
+  - 设计文档：
+    - `docs/plans/2026-04-04-exp096-pad18-rescue-retrain-design.md`
+  - 配置：
+    - `configs/experiments/exp_096_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_ce_neighborhoodaware_fixed055_valloss_hfliptta.yaml`
+  - 方案：
+    - 训练 recipe 继承 `exp_091`
+    - 输入协议切换到 `exp_093` 的 `pad18 rescue multiface-selected`
+    - `50 epoch`
+    - `val_loss / min`
+    - `last2block`
+    - `CE + neighborhood_aware + hfliptta`
+- 训练结果：
+  - `best_val_loss = 0.001385191222652793`
+  - checkpoint：
+    - `outputs/exp_096_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_ce_neighborhoodaware_fixed055_valloss_hfliptta/checkpoints/best.ckpt`
+- 推理结果：
+  - submission：
+    - `data/submissions/20260404_132520_exp_096_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_ce_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+  - 与 `exp_088` 按 `id` merge 后逐行比较：
+    - `num_diff = 0`
+  - 用户重点关注的 8 张高价值错例：
+    - `48, 289, 361, 543, 612, 699, 1333, 1525`
+    - 仍然全部保持为 `0`
+- 结论：
+  - 仅把训练分布切换到 `exp_093` 的 rescue 输入协议，还不足以改写当前主线的 test 决策边界
+  - 因此“训练/推理输入不一致”虽然是合理怀疑，但**不是唯一根因**
+  - 下一步如果还想继续突破，应该考虑：
+    - 更有针对性的训练目标
+    - 或围绕 fallback / 弱证据样本的专门训练增强，而不是再做同构重训
+
+### Session 68
+
+- 用户明确拒绝继续堆叠过于任务专门化的手工修补（如样本权重、人工规则），希望下一步方法仍然足够“神经网络化”且能写进报告。
+- 基于此前诊断，决定重新验证 `CosFace`：
+  - 之前做过 margin-based loss，但当时的数据处理协议尚未修正，因此旧结论无效
+  - 当前系统的最终决策本来就依赖 embedding / prototype / threshold 几何结构，理论上比单纯 `CE` 更匹配 margin-based 训练目标
+- 因此执行一条受控对比实验：
+  - `exp_097 = exp_096` 的 clean recipe
+  - 唯一核心变化是 `loss: CE -> CosFace`
+- `exp_097`：
+  - 设计文档：
+    - `docs/plans/2026-04-04-exp097-cosface-retrain-design.md`
+  - 配置：
+    - `configs/experiments/exp_097_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_cosface_neighborhoodaware_fixed055_valloss_hfliptta.yaml`
+  - 训练结果：
+    - `best_val_loss = 0.025193748995661736`
+    - checkpoint：
+      - `outputs/exp_097_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_cosface_neighborhoodaware_fixed055_valloss_hfliptta/checkpoints/best.ckpt`
+  - 推理结果：
+    - submission：
+      - `data/submissions/20260404_135527_exp_097_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_cosface_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+    - 与 `exp_088` 按 `id` merge 后逐行比较：
+      - `num_diff = 0`
+    - 与 `exp_096` 按 `id` merge 后逐行比较：
+      - `num_diff = 0`
+    - 用户重点关注的 8 张高价值错例：
+      - `48, 289, 361, 543, 612, 699, 1333, 1525`
+      - 仍然全部保持为 `0`
+- 当前阶段性结论再次收敛：
+  - 在**当前三类训练设定**下，把 `CE` 换成 `CosFace` 仍然没有改写 submission
+  - 这与用户对 `other` 的判断一致：
+    - `other` 并不是单一干净类
+    - 其中包含大量 `Michael / Sarah` 相似脸，以及少量其他杂类
+  - 因而“把异质 `other` 也一起拉入统一 margin 分类”的收益，至少在当前 recipe 下没有体现出来
+
+### Session 69
+
+- 为避免过早否定 `CosFace`，补做一轮只改推理、不重训的阈值重标定：
+  - 配置：
+    - `configs/experiments/exp_098_vit_adaface_multiface_selected_pad18_rescue_cosface_neighborhoodaware_threshold_recalibrated_hfliptta.yaml`
+  - checkpoint 来源：
+    - `exp_097`
+- `exp_098` 结果：
+  - 自动选中 `selected_threshold = 0.25`
+  - `val_accuracy = 1.0`
+  - 相对 `exp_097 / exp_088` 共放出 `7` 张新样本：
+    - `211: 0->1`
+    - `213: 0->1`
+    - `420 / 1455 / 1540 / 1542 / 1777: 0->2`
+  - 但用户重点关注的 8 张：
+    - `48, 289, 361, 543, 612, 699, 1333, 1525`
+    - **仍然全部没有被救回**
+- 因此结论更清楚了：
+  - `CosFace` 的分数尺度确实与 `CE` 不同，单独重标定阈值是必要的
+  - 但即便重标定后，它释放出来的也不是当前已知最有价值的那批错例
+  - 所以下一步主方向**不应继续围绕 CosFace 阈值微调**，而应转向更贴合 `other` 异质结构的训练/建模方案
+
+### Session 70
+
+- 在确认 `exp_098` public score `0.98017` 后，正式启动任务重建模实验：
+  - `exp_099`
+  - 核心思路不是继续做三类 softmax，而是把训练任务改成：
+    - `is_class1`
+    - `is_class2`
+    - `other` 作为两个头的共同负样本补集
+- 代码层面的实现保持最小：
+  - 新增 `bce_ovr` loss 分支
+  - 推理主线完全不变，仍使用 `prototype + neighborhood_aware + fixed055`
+  - 这样可以把结论严格归因到**训练任务定义**本身
+- 新增与通过的测试：
+  - `tests/test_lightning_module.py`
+  - 覆盖：
+    - `bce_ovr` 可稳定训练
+    - 低置信样本会在验证阶段被拒到 `other`
+- 实验材料：
+  - 设计文档：
+    - `docs/plans/2026-04-04-exp099-bce-ovr-design.md`
+  - 配置：
+    - `configs/experiments/exp_099_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_bceovr_neighborhoodaware_fixed055_valloss_hfliptta.yaml`
+- 训练结果：
+  - `best_val_loss = 0.0014043942792341113`
+  - checkpoint：
+    - `outputs/exp_099_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_bceovr_neighborhoodaware_fixed055_valloss_hfliptta/checkpoints/best.ckpt`
+- 推理结果：
+  - submission：
+    - `data/submissions/20260404_141936_exp_099_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_bceovr_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+  - 相对 `exp_088 / exp_096 / exp_097`：
+    - `num_diff = 1`
+  - 唯一改变样本：
+    - `id=1540: 0 -> 2`
+  - 用户重点关注的 8 张高价值样本：
+    - `48, 289, 361, 543, 612, 699, 1333, 1525`
+    - 仍然全部没有被救回
+- 当前判断：
+  - `exp_099` 是**第一条在不改任何推理后处理的前提下，真正改写了 test 边界**的训练实验
+  - 但由于只改了 `1` 张，目前还不能认为它已经带来稳定增益
+  - 它最自然的下一步不是换方向，而是：
+    - 先做 `exp_099` 自己的阈值重标定
+
+### Session 71
+
+- 执行 `exp_100 = exp_099 + threshold recalibration`：
+  - 配置：
+    - `configs/experiments/exp_100_vit_adaface_multiface_selected_pad18_rescue_bceovr_neighborhoodaware_threshold_recalibrated_hfliptta.yaml`
+  - checkpoint 来源：
+    - `exp_099`
+- 阈值搜索结果：
+  - 自动选中 `selected_threshold = 0.49`
+  - `val_accuracy = 1.0`
+- 相对 submission 的变化：
+  - 相对 `exp_099`：
+    - `num_diff = 1`
+    - 新增 `id=1455: 0 -> 2`
+  - 相对 `exp_088`：
+    - `num_diff = 2`
+    - `1455: 0 -> 2`
+    - `1540: 0 -> 2`
+- 但用户重点关注的 8 张核心错例：
+  - `48, 289, 361, 543, 612, 699, 1333, 1525`
+  - 仍然全部保持为 `0`
+- 当前结论：
+  - one-vs-rest 这条线在固定推理协议下，确实比 `CE/CosFace` 更早出现 test 边界变化
+  - 但目前释放出来的仍是少量边缘样本，而不是当前最想解决的那批高价值错例
+  - 因此 `exp_100` 仍然不足以支持提交
+
+### Session 72
+
+- 执行 `exp_101 = exp_099 + target-only supervised contrastive auxiliary loss`：
+  - 设计文档：
+    - `docs/plans/2026-04-04-exp101-bce-ovr-supcon-design.md`
+  - 配置：
+    - `configs/experiments/exp_101_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_bceovr_supcon_neighborhoodaware_fixed055_valloss_hfliptta.yaml`
+- 代码实现：
+  - 在 `bce_ovr` 基础上新增 `bce_ovr_supcon`
+  - `SupCon` 为 target-only：
+    - 只让 `class1/class2` 形成正对
+    - 不强迫异质 `other` 形成单一簇
+  - 相关测试已补入并通过：
+    - `tests/test_lightning_module.py`
+- 训练结果：
+  - `best_val_loss = 0.0781790018081665`
+  - checkpoint：
+    - `outputs/exp_101_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_bceovr_supcon_neighborhoodaware_fixed055_valloss_hfliptta/checkpoints/best.ckpt`
+- 推理结果：
+  - submission：
+    - `data/submissions/20260404_143800_exp_101_vit_adaface_multiface_selected_pad18_rescue_50ep_last2block_bceovr_supcon_neighborhoodaware_fixed055_valloss_hfliptta_submission.csv`
+  - 相对 `exp_099`：
+    - `num_diff = 0`
+  - 相对 `exp_100`：
+    - 少了 `id=1455: 2 -> 0`
+  - 相对 `exp_088`：
+    - 仍然只有 `id=1540: 0 -> 2`
+  - 用户重点关注的 8 张核心错例：
+    - `48, 289, 361, 543, 612, 699, 1333, 1525`
+    - 依旧全部没有变化
+- 附带信号：
+  - `prototype_metrics.json` 中固定 `0.55` 下的 `val_accuracy = 0.9375`
+  - 相比 `exp_099`，说明当前 `SupCon` 辅助项并未带来更稳定的验证边界
+- 结论：
+  - `target-only SupCon` 在当前超参与 batch 条件下，**没有超过纯 `bce_ovr` 主线**
+  - 当前最稳的 one-vs-rest 版本仍然是 `exp_099/100`
+
+### Session 73
+
+- 执行 `exp_102 = exp_101 + threshold recalibration`：
+  - 配置：
+    - `configs/experiments/exp_102_vit_adaface_multiface_selected_pad18_rescue_bceovr_supcon_neighborhoodaware_threshold_recalibrated_hfliptta.yaml`
+  - checkpoint 来源：
+    - `exp_101`
+- 阈值搜索结果：
+  - 自动选中 `selected_threshold = 0.55`
+  - `val_accuracy = 1.0`
+  - 也就是说：`exp_101` 这条 `SupCon` 分支并没有出现像 `exp_099` 那样需要单独下调阈值的迹象
+- 相对 submission 的变化：
+  - 相对 `exp_101`：
+    - `num_diff = 1`
+    - 新增 `id=1341: 0 -> 2`
+  - 相对 `exp_100`：
+    - 也是 `num_diff = 2`
+    - `exp_100` 的 `1455: 0 -> 2` 被撤回
+    - 换成 `1341: 0 -> 2`
+    - `1540: 0 -> 2` 保持不变
+- 用户重点关注的 8 张核心错例：
+  - `48, 289, 361, 543, 612, 699, 1333, 1525`
+  - 仍然全部没有变化
+- 当前最终判断：
+  - `exp_102` 没有超过 `exp_100`
+  - `SupCon` 这条分支在当前数据规模与训练条件下，只是在少量边缘样本之间互换释放对象
+  - 因而这一整条 `exp_101/102` 线路可以收束，不再继续追加 follow-up
+
+### Session 74
+
+- 执行 `exp_103 = exp_088 recipe + full-train on all 79 labeled samples`：
+  - 配置：
+    - `configs/experiments/exp_103_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_fulltrain79.yaml`
+  - 核对训练/推理逻辑：
+    - `data.use_full_train=true` 时，`FaceDataModule` 会把 `train+val` 合并成 79 张训练样本
+    - `train.py` 在 full-train 模式下不再依赖 best-val checkpoint，而是保存 `last.ckpt`
+    - `predict.py` 的 `neighborhood_aware` 默认 `gallery_source=train`，因此会直接使用 merged train gallery
+- 训练结果：
+  - 输出目录：
+    - `outputs/exp_103_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_fulltrain79`
+  - checkpoint：
+    - `outputs/exp_103_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_fulltrain79/checkpoints/last.ckpt`
+  - `metrics.json`：
+    - `use_full_train = true`
+    - `best_val_acc = null`（符合 full-train 仅保存 last 的逻辑）
+- 推理结果：
+  - submission：
+    - `data/submissions/20260404_145351_exp_103_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_fulltrain79_submission.csv`
+  - `prototype_metrics.json`：
+    - `selected_threshold = 0.55`
+    - `val_accuracy = 1.0`
+    - `mean_test_final_score = 0.5072612166404724`
+- 与 `exp_088` 的直接对比：
+  - `num_diff = 0`
+  - 也就是 full-train 79 张后，submission 逐行完全不变
+- 用户长期关注的 8 张核心错例：
+  - `48, 289, 361, 543, 612, 699, 1333, 1525`
+  - 在 `exp_103` 中仍然全部保持为 `0`
+- 当前结论：
+  - “关键模态只在 val、没被训练到” 这个假设已经被这条最干净的 full-train CE 实验显著削弱
+  - 至少在 `exp_088` 同构 recipe 下，把 16 张 val 并入训练并没有改变任何 test 决策边界
+
+### Session 75
+
+- 重新检查 `exp_085` 时代的异构链路后确认：
+  - 历史有效的 `buffalo` / `ViT + buffalo` 组合全部建立在旧协议上
+  - 旧底座包括：
+    - `exp_067_buffalo_l_detect_align_dual_verifier_lookalike`
+    - `exp_086_buffalo_l_detect_align_multiface_dual_verifier_lookalike`
+    - `exp_085_vit061_buffalol067_agreementaware_rescueonly_labeledloo`
+  - 它们都没有挂到当前修正后的 `exp_093` 协议
+
+- 执行 `exp_104`：当前协议下的 **多脸 max-pool buffalo standalone**
+  - 配置：
+    - `configs/experiments/exp_104_buffalo_l_detect_align_multiface_dual_verifier_lookalike_pad18_rescue.yaml`
+  - 产物：
+    - submission：`data/submissions/20260404_150521_exp_104_buffalo_l_detect_align_multiface_dual_verifier_lookalike_pad18_rescue_submission.csv`
+    - metrics：`outputs/exp_104_buffalo_l_detect_align_multiface_dual_verifier_lookalike_pad18_rescue/prototype_metrics.json`
+  - 相对 `exp_088 / exp_093`：
+    - `num_diff = 23`
+    - 全部是收缩：
+      - `1 -> 0: 22`
+      - `2 -> 0: 1`
+  - 8 张核心错例：
+    - `48, 289, 361, 543, 612, 699, 1333, 1525`
+    - 全部仍为 `0`
+  - 结论：
+    - 当前协议下，**多脸 max-pool buffalo 单模没有提供可用 rescue 信号**
+    - 它只是比 `exp_088/093` 更保守
+
+- 执行 `exp_105`：当前协议下的 **ViT + buffalo rescue-only 异构融合**
+  - 命令底座：
+    - `scripts/predict_061_067_agreement_rescue_labeledloo.py`
+  - 实际 primary / secondary：
+    - primary：`exp_093`（显式使用 `exp_088` checkpoint）
+    - secondary：当前协议 buffalo
+  - 产物：
+    - submission：`data/submissions/20260404_151103_exp_105_vit093_buffalol104_agreementaware_rescueonly_labeledloo_submission.csv`
+    - metrics：`outputs/exp_105_vit093_buffalol104_agreementaware_rescueonly_labeledloo/prototype_metrics.json`
+  - 结果：
+    - 相对 `exp_088 / exp_093`：
+      - `num_diff = 25`
+      - 全部是放宽：
+        - `0 -> 1: 13`
+        - `0 -> 2: 12`
+    - 8 张核心错例里：
+      - `48: 0 -> 1`
+      - 其余 `289 / 361 / 543 / 612 / 699 / 1333 / 1525` 仍不变
+  - 重要细节：
+    - 这 25 张 rescue 信号并不是来自 `exp_104` 的多脸 max-pool submission 本身
+    - 而是来自该融合脚本内部使用的 **当前协议单脸 buffalo dual verifier 打分表**
+  - 风险提示：
+    - `labeled_loo_rescue_subset_size = 0`
+    - 也就是 train+val 上没有任何一张样本触发 rescue
+    - 但 test 上却触发了 `25` 张
+    - 说明它是**明显的 test-only 外推型高风险 submission**
+
+- 为了把信号拆干净，继续执行 `exp_106`：当前协议下的 **单脸 buffalo standalone**
+  - 配置：
+    - `configs/experiments/exp_106_buffalo_l_detect_align_dual_verifier_lookalike_pad18_rescue.yaml`
+  - 产物：
+    - submission：`data/submissions/20260404_151420_exp_106_buffalo_l_detect_align_dual_verifier_lookalike_pad18_rescue_submission.csv`
+    - metrics：`outputs/exp_106_buffalo_l_detect_align_dual_verifier_lookalike_pad18_rescue/prototype_metrics.json`
+  - 相对 `exp_088`：
+    - `num_diff = 132`
+    - 变化构成：
+      - `1 -> 0: 72`
+      - `2 -> 0: 16`
+      - `0 -> 1: 13`
+      - `0 -> 2: 12`
+      - `1 -> 2: 11`
+      - `2 -> 1: 8`
+    - 8 张核心错例里：
+      - 仅 `48: 0 -> 1`
+      - 其他 7 张不变
+  - 结论：
+    - 当前协议下，**单脸 buffalo 仍然保留异构信号**
+    - 但单模本身改动过大，明显不是稳妥提交候选
+
+- 当前阶段总结：
+  - `buffalo` 在当前协议下 **不是完全失效**
+  - 但有效信号来自 **单脸 dual verifier 分数**
+  - 不是来自 **多脸 max-pool buffalo standalone**
+  - 因而如果后续继续利用这条线，合理对象应是：
+    - `exp_105` 这类以 `exp_093` 为锚点的 rescue-only 异构候选
+  - 而不是 `exp_104` 或 `exp_106` 这种 buffalo 单模 submission
+
+- 用户已补回 Kaggle public：
+  - `exp_105 = 0.97026`
+  - `exp_106 = 0.92676`
+  - 两者都低于当前最佳 `exp_088 = 0.98403`
+
+- 新增 `shadow probe` 监控能力：
+  - 代码：
+    - `src/dl_pipeline/training/shadow_probe.py`
+    - `scripts/train.py`
+    - `tests/test_shadow_probe.py`
+  - 作用：
+    - 在训练过程中，对 8 张核心 test case
+      - `48, 289, 361, 543, 612, 699, 1333, 1525`
+    - 按**正式 prototype/open-set 推理逻辑**逐 epoch 导出：
+      - `argmax_label`
+      - `pred_config_threshold`
+      - `pred_val_selected_threshold`
+      - `base_score`
+      - `neighbor_score`
+      - `final_score`
+      - `selected_threshold`
+
+- 先跑 `exp_107`，后发现一个真实 bug：
+  - `shadow probe` callback 在导出 embedding 时切到了 `eval()`
+  - 但结束后没有切回 `train()`
+  - 这会污染后续 epoch
+  - 已修复后改用 `exp_108` 重新完整跑一遍
+
+- 执行 `exp_108`：
+  - 配置：
+    - `configs/experiments/exp_108_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_shadowprobe8_rerun.yaml`
+  - 产物：
+    - `outputs/exp_108_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_shadowprobe8_rerun/shadow_probe_history.csv`
+    - `outputs/exp_108_vit_adaface_multiface_selected_20ep_last2block_ce_neighborhoodaware_fixed055_hfliptta_shadowprobe8_rerun/metrics.json`
+  - 结果：
+    - `best_val_acc = 1.0`
+    - 8 张核心 case 在全部 `9` 个 epoch 中：
+      - `argmax_label` 始终都是 `2`
+      - 说明模型从头到尾都更偏向 `class2`
+    - 但它们的 `final_score` 始终只有大约 `0.26 ~ 0.35`
+    - 每个 epoch 在 val 上自动选出的最优阈值始终是 `0.50`
+    - 即使按 `0.50`，这 8 张也**没有一张**曾经被放出来
+    - 最接近的一张仍是 `699`，峰值约 `0.35`
+  - 结论：
+    - 这 8 张不是“某些 epoch 学会了，后来又过拟合掉了”
+    - 而是整个训练过程中都只是**弱证据 `class2`**
+    - 因此：
+      - 不值得继续沿着
+        - 改 early stopping
+        - 换 epoch
+        - 把这 8 张当正式 val
+      - 这条线继续投入的价值很低

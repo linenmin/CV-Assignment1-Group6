@@ -21,6 +21,7 @@ from dl_pipeline.data.datamodule import FaceDataModule
 from dl_pipeline.training.progress import AsciiTQDMProgressBar
 from dl_pipeline.training.lightning_module import FaceClassifierModule
 from dl_pipeline.training.monitoring import resolve_monitor_config
+from dl_pipeline.training.shadow_probe import ShadowProbeEpochCallback, resolve_shadow_probe_config
 from dl_pipeline.models.classifier import (
     imprint_cosine_classifier_weight_from_loader,
     imprint_linear_head_from_loader,
@@ -104,6 +105,9 @@ def main() -> None:
         cosface_scale=loss_config.get("cosface_scale", loss_config.get("arcface_scale", 30.0)),
         cosface_margin=loss_config.get("cosface_margin", 0.35),
         label_smoothing=float(loss_config.get("label_smoothing", 0.0)),
+        ovr_threshold=float(loss_config.get("ovr_threshold", 0.5)),
+        supcon_weight=float(loss_config.get("supcon_weight", 0.0)),
+        supcon_temperature=float(loss_config.get("supcon_temperature", 0.1)),
     )
     print("[train] 模型构建完成。", flush=True)
 
@@ -138,6 +142,16 @@ def main() -> None:
             )
 
     progress_bar = AsciiTQDMProgressBar(refresh_rate=1)
+    shadow_probe_callback = None
+    shadow_probe_config = resolve_shadow_probe_config(config, output_root)
+    if shadow_probe_config is not None:
+        shadow_probe_callback = ShadowProbeEpochCallback(
+            probe_config=shadow_probe_config,
+            image_size=int(config["data"]["face_size"]),
+            normalization=str(config["data"]["normalization"]),
+            batch_size=int(config["train"]["batch_size"]),
+            num_workers=int(config["data"]["num_workers"]),
+        )
     if use_full_train:
         checkpoint_callback = ModelCheckpoint(
             dirpath=output_root / "checkpoints",
@@ -159,6 +173,8 @@ def main() -> None:
             mode=monitor_config.mode,
         )
         callbacks = [checkpoint_callback, early_stopping, progress_bar]
+    if shadow_probe_callback is not None:
+        callbacks.append(shadow_probe_callback)
 
     accumulate = int(config["train"].get("accumulate_grad_batches", 1))
     trainer_kwargs: dict = dict(

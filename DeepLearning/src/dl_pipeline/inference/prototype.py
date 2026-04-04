@@ -487,6 +487,35 @@ def neighborhood_aware_predictions(
     return predictions, base_scores, neighbor_mean_scores, final_scores
 
 
+def neighborhood_aware_predictions_with_class_thresholds(
+    query_embeddings: torch.Tensor,
+    prototypes: dict[int, torch.Tensor],
+    other_label: int,
+    thresholds_by_class: dict[int, float],
+    top_k: int,
+    base_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not thresholds_by_class:
+        raise ValueError("thresholds_by_class 不能为空。")
+
+    predictions, base_scores, neighbor_mean_scores, final_scores = neighborhood_aware_predictions(
+        query_embeddings=query_embeddings,
+        prototypes=prototypes,
+        other_label=other_label,
+        threshold=0.0,
+        top_k=top_k,
+        base_weight=base_weight,
+    )
+    predicted_labels = predictions.clone()
+    effective_thresholds = torch.tensor(
+        [float(thresholds_by_class.get(int(label), 1.0)) for label in predicted_labels.tolist()],
+        dtype=final_scores.dtype,
+        device=final_scores.device,
+    )
+    predictions[final_scores < effective_thresholds] = other_label
+    return predictions, base_scores, neighbor_mean_scores, final_scores
+
+
 def neighborhood_aware_predictions_adaptive_threshold(
     query_embeddings: torch.Tensor,
     prototypes: dict[int, torch.Tensor],
@@ -1142,6 +1171,48 @@ def select_best_neighborhood_threshold(
             best_threshold = float(threshold)
             best_accuracy = float(accuracy)
     return best_threshold, best_accuracy, details
+
+
+def select_best_neighborhood_class_thresholds(
+    val_embeddings: torch.Tensor,
+    val_labels: torch.Tensor,
+    prototypes: dict[int, torch.Tensor],
+    other_label: int,
+    threshold_values_by_class: dict[int, list[float]],
+    top_k: int,
+    base_weight: float,
+) -> tuple[dict[int, float], float]:
+    if not threshold_values_by_class:
+        raise ValueError("threshold_values_by_class 不能为空。")
+
+    class_labels = list(threshold_values_by_class.keys())
+    if any(not threshold_values_by_class[label] for label in class_labels):
+        raise ValueError("每个类别都必须提供至少一个候选阈值。")
+
+    best_thresholds = {
+        int(label): float(threshold_values_by_class[label][0]) for label in class_labels
+    }
+    best_accuracy = -1.0
+    threshold_grids = [threshold_values_by_class[label] for label in class_labels]
+
+    for candidate_thresholds in product(*threshold_grids):
+        thresholds = {
+            int(label): float(threshold)
+            for label, threshold in zip(class_labels, candidate_thresholds)
+        }
+        predictions, _, _, _ = neighborhood_aware_predictions_with_class_thresholds(
+            query_embeddings=val_embeddings,
+            prototypes=prototypes,
+            other_label=other_label,
+            thresholds_by_class=thresholds,
+            top_k=top_k,
+            base_weight=base_weight,
+        )
+        accuracy = (predictions == val_labels).float().mean().item()
+        if accuracy > best_accuracy:
+            best_thresholds = thresholds
+            best_accuracy = accuracy
+    return best_thresholds, best_accuracy
 
 
 def select_best_threshold_crossval(

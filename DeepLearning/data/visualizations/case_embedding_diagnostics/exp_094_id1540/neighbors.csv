@@ -1,0 +1,7 @@
+case_id,target_class,rank,neighbor_id,similarity,neighbor_image_path
+1540,class1,1,67,0.16647720336914062,data\processed\exp_093_multiface_selected_pad18_rescue_faces_112\train\67.png
+1540,class1,2,48,0.16000157594680786,data\processed\exp_093_multiface_selected_pad18_rescue_faces_112\train\48.png
+1540,class1,3,22,0.11660809069871902,data\processed\exp_093_multiface_selected_pad18_rescue_faces_112\val\22.png
+1540,class2,1,43,0.28343895077705383,data\processed\exp_093_multiface_selected_pad18_rescue_faces_112\train\43.png
+1540,class2,2,8,0.2797345817089081,data\processed\exp_093_multiface_selected_pad18_rescue_faces_112\train\8.png
+1540,class2,3,44,0.23651862144470215,data\processed\exp_093_multiface_selected_pad18_rescue_faces_112\train\44.png

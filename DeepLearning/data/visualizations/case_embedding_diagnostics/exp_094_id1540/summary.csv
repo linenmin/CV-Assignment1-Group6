@@ -1,0 +1,2 @@
+id,pred,base_score,neighbor_score,final_score,score_class1,score_class2,class_margin,selection_source_093,selected_score_jesse_093,selected_score_mila_093,selected_excess_jesse_093,selected_excess_mila_093,selection_source_088
+1540,0.0,0.19136151671409607,0.7837039232254028,0.48753273487091064,0.09210903942584991,0.19136151671409607,0.09925247728824615,detect_align_selected,0.0354403480887413,0.1351576596498489,-0.6471016779541969,-0.2803894132375717,detect_align_selected

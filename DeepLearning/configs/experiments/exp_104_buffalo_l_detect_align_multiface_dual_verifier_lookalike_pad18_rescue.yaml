@@ -1,0 +1,39 @@
+# exp_104：将 buffalo_l 多脸 dual verifier 迁移到当前 exp_093 pad18 rescue 协议
+
+experiment_name: exp_104_buffalo_l_detect_align_multiface_dual_verifier_lookalike_pad18_rescue
+data:
+  detector: multiface_selected
+  processed_dir: data/processed/exp_093_multiface_selected_pad18_rescue_faces_112
+  splits_dir: data/splits/exp_093_multiface_selected_pad18_rescue
+  face_size: 112
+  normalization: face
+  num_workers: 0
+model:
+  family: cvlface
+  backbone_name: vit_base
+  pretrained: true
+  pretrained_repo_id: minchul/cvlface_adaface_vit_base_webface4m
+  freeze_backbone: true
+train:
+  batch_size: 8
+  max_epochs: 1
+  learning_rate: 0.0003
+  accelerator: cpu
+  devices: 1
+  precision: 32
+  scheduler: cosine
+inference:
+  mode: insightface_dual_verifier_multiface
+  insightface_name: buffalo_l
+  insightface_embedding: detect_align_with_crop_fallback
+  det_size: [640, 640]
+  ctx_id: 0
+  gallery_top_k: 5
+  tta_horizontal_flip: true
+  jesse_class: 1
+  mila_class: 2
+  other_class: 0
+  michael_like_cluster: 1
+  sarah_like_cluster: 0
+  lookalike_assignments_csv: reports/analysis/exp_029_other_k2/other_cluster_assignments.csv
+  probe_face_selection: all_faces_max_pool
