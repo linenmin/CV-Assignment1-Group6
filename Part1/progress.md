@@ -248,3 +248,31 @@
 - added a short markdown note at the start of `4.3 / 4.4`
 - this note now explicitly explains that the searches were executed offline, but the best CV scores and hyperparameters are still preserved in the notebook as report evidence
 - this keeps the contribution of the original model-selection work visible while preserving a fast Kaggle execution path
+
+## Session: 2026-04-05 (PCA deliverables aligned with assignment)
+
+### Completed in this session
+
+**1. Added the two missing PCA visualisation deliverables**
+- added a reconstruction plot that shows one face rebuilt with progressively more eigenfaces
+- added a direct `PC1 / PC2` scatter plot for the PCA feature space
+- kept `t-SNE` as a supplementary visualisation instead of using it as a replacement
+
+**2. Extended the reusable plotting helpers in `src/visualization.py`**
+- added `plot_reconstruction_progression(...)`
+- added `plot_pca_component_scatter(...)`
+- both helpers now return figure handles so they are easier to validate and reuse
+
+**3. Updated the notebook narrative around PCA**
+- `1.2.1` now explicitly matches the reconstruction requirement from the assignment
+- `1.2.2` now explains that `PC1 / PC2` is the primary PCA-space visualisation
+- `1.2.3` discussion was tightened so it refers to the new reconstruction and `PC1 / PC2` plots rather than over-relying on `t-SNE`
+
+### Verification
+
+- added and ran lightweight visualization tests for the two new helpers
+- reran `ga1_Group_6.ipynb` through `cell 60`
+- saved notebook output now includes:
+  - three PCA visuals in `cell 34` (eigenfaces, explained variance, progressive reconstruction)
+  - two PCA-space visuals in `cell 36` (`PC1 / PC2` scatter + `t-SNE`)
+- the fast submission path still executes successfully in about `40 s`

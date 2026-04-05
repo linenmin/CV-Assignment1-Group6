@@ -10,6 +10,12 @@ plot_image_sequence(data, n, imgs_per_row=7)
 
 norm_for_display(arr)
     Min-max normalise an array to [0, 1] for matplotlib rendering.
+
+plot_reconstruction_progression(pca_extractor, image, k_values)
+    Show one face reconstructed with gradually more eigenfaces.
+
+plot_pca_component_scatter(features, labels)
+    Plot the first two PCA coordinates with class-coloured markers.
 """
 
 import numpy as np
@@ -49,6 +55,17 @@ def norm_for_display(arr):
     return (arr - lo) / (hi - lo + 1e-8)
 
 
+def _imshow(ax, image):
+    """Display RGB or grayscale image arrays without matplotlib warnings."""
+    image = np.asarray(image)
+    if image.ndim == 3 and image.shape[-1] == 1:
+        ax.imshow(image[..., 0], cmap='gray')
+    elif image.ndim == 2:
+        ax.imshow(image, cmap='gray')
+    else:
+        ax.imshow(image)
+
+
 def plot_eigenfaces(pca_extractor, n_show=16):
     """Display the top *n_show* eigenfaces from a fitted PCAFeatureExtractor."""
     eigenfaces = pca_extractor.pca.components_[:n_show].reshape(
@@ -83,6 +100,58 @@ def plot_explained_variance(pca_extractor, train_X_clean, n_components_chosen):
     plt.grid(True, alpha=0.4)
     plt.tight_layout()
     plt.show()
+
+
+def plot_reconstruction_progression(pca_extractor, image, k_values=(1, 5, 10, 20, 50)):
+    """Show one face reconstructed with progressively more principal components."""
+    image_batch = np.asarray(image)[None, ...]
+    coeffs = pca_extractor.transform(image_batch)
+    k_values = [int(k) for k in k_values]
+
+    fig, axes = plt.subplots(1, len(k_values) + 1, figsize=(2.5 * (len(k_values) + 1), 3.0))
+    if not isinstance(axes, np.ndarray):
+        axes = np.array([axes])
+
+    _imshow(axes[0], norm_for_display(image.astype(np.float64)))
+    axes[0].set_title('Original')
+    axes[0].axis('off')
+
+    for ax, k in zip(axes[1:], k_values):
+        truncated = np.zeros_like(coeffs)
+        truncated[:, :k] = coeffs[:, :k]
+        recon = pca_extractor.inverse_transform(truncated)[0]
+        _imshow(ax, norm_for_display(recon.astype(np.float64)))
+        ax.set_title(f'k = {k}')
+        ax.axis('off')
+
+    plt.suptitle('Face Reconstruction with Increasing Eigenfaces', fontsize=12)
+    plt.tight_layout()
+    plt.show()
+    return fig, axes
+
+
+def plot_pca_component_scatter(features, labels):
+    """Plot the first two PCA coordinates of the dataset."""
+    CLASS_IDS = [0, 1, 2]
+    CLASS_COLORS = ['green', 'blue', 'red']
+    CLASS_LABELS = ['Look-alikes (0)', 'Jesse (1)', 'Mila (2)']
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for cls, color, label in zip(CLASS_IDS, CLASS_COLORS, CLASS_LABELS):
+        mask = labels == cls
+        ax.scatter(
+            features[mask, 0], features[mask, 1],
+            c=color, label=label, alpha=0.75, s=70,
+            edgecolors='k', linewidths=0.3,
+        )
+    ax.set_title('Faces Projected onto the First Two Principal Components')
+    ax.set_xlabel('PC1')
+    ax.set_ylabel('PC2')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    return fig, ax
 
 
 def plot_tsne(features, labels, n_components_label=''):
