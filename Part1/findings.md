@@ -78,3 +78,65 @@ Therefore the DL section should not introduce these issues as if they appear for
 - representative crop comparison figure for Section 4.7
 - final runnable Kaggle inference cells
 - final Kaggle dataset payload definition
+
+## Classical Fresh Rerun Decision
+
+### The fresh rerun is now the authoritative reference for Sections 4.3-4.5
+A full local rerun of the classical model-selection chain was completed after fixing two blockers:
+- invalid PCA dimensions inside `GridSearchCV`
+- fragile data-path discovery when running from `Part1/`
+
+This rerun should now be treated as the authoritative reference for the classical results in the notebook body.
+
+### Fresh classical results
+
+| Pipeline | Fresh CV |
+|----------|---------:|
+| `[A]` HOG+PCA+SVM | `0.8625` |
+| `[B]` LBP+SVM | `0.8000` |
+| `[C]` HOG+LBP+PCA+SVM | `0.8625` |
+| `[D]` PixelPCA+SVM | `0.7625` |
+| `[E]` HOG+PCA+SVM (aug, leaky) | `0.9594` |
+| `[F]` HOG+LBP+PCA+SVM (aug, leaky) | `0.9437` |
+| `[G]` LBP+SVM (aug, leaky) | `0.8281` |
+| `[H]` HOG+PCA+SVM (aug-aware, honest) | `0.9125` |
+| `[I]` HOG+LBP+PCA+SVM (aug-aware, honest) | `0.9000` |
+
+### Final classical-selection interpretation
+- the highest leaky score is still `[E]`, but it is `0.9594`, not `0.9781`
+- the best honest model is `[H]`, not a generic `[H/I]` label
+- the honest model should be described using:
+  - `pca__n_components = 80`
+  - `C = 100`
+  - `gamma = scale`
+
+### Important writing implication
+The final train-set report from the fresh rerun is:
+- accuracy = `1.0000`
+- support = `80`
+- all classes have `1.00` precision / recall / F1
+
+This must be described carefully:
+- it is a training-set fit result
+- it is not the primary evidence for generalisation
+- the honest generalisation estimate still comes from augmentation-aware CV, namely `0.9125`
+
+### Required notebook text updates
+- replace stale `[E]` values such as `0.9781` and `0.9601`
+- replace stale honest-best value `0.9121`
+- remove the old narrative tied to the stale `69`-sample report
+- rewrite the final model analysis so it does not over-interpret the train accuracy
+
+## Saved Notebook Execution Note
+
+### The saved notebook outputs differ slightly from the earlier standalone rerun
+After re-executing the actual notebook and saving outputs through `cell 60`, the saved notebook now shows:
+- `[F] = 0.9531` instead of the earlier standalone `0.9437`
+- `[H] = 0.9125`
+- `[I] = 0.9125`
+
+This means the saved notebook should now be read as showing an honest-score tie between the two augmentation-aware pipelines, even though the detailed search output still prints `[H]` as the best honest model line.
+
+### Practical implication
+- the notebook is now saved with fresh outputs
+- the final write-up should describe the honest result as `0.9125`, with `[H]` and `[I]` tied in the saved notebook outputs

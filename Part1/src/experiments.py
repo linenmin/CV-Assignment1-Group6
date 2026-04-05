@@ -20,7 +20,6 @@ select_best_honest_model(candidates, leaky_keys)
     Pick the best non-leaky model from the candidates dict.
 """
 
-import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA as skPCA
 from sklearn.metrics import accuracy_score, classification_report
@@ -51,6 +50,29 @@ def make_scaler_svm_pipeline():
 
 # ── GridSearch helper ─────────────────────────────────────────────────────────
 
+def _sanitize_param_grid(features, labels, param_grid, n_splits):
+    """Drop PCA component counts that are impossible inside CV folds."""
+    if 'pca__n_components' not in param_grid:
+        return param_grid, []
+
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    min_train_samples = min(len(tr_idx) for tr_idx, _ in cv.split(features, labels))
+    max_components = min(min_train_samples, features.shape[1])
+
+    cleaned = dict(param_grid)
+    original_values = list(cleaned['pca__n_components'])
+    valid_values = [value for value in original_values if value <= max_components]
+    removed_values = [value for value in original_values if value > max_components]
+
+    if not valid_values:
+        raise ValueError(
+            "No valid PCA component counts remain for CV: "
+            f"max allowed is {max_components}, requested {original_values}"
+        )
+
+    cleaned['pca__n_components'] = valid_values
+    return cleaned, removed_values
+
 def run_grid_search(features, labels, param_grid, label='', n_splits=5):
     """Fit GridSearchCV and return the fitted object.
 
@@ -66,13 +88,22 @@ def run_grid_search(features, labels, param_grid, label='', n_splits=5):
     -------
     gs : fitted GridSearchCV
     """
-    pipe = make_pca_svm_pipeline() if any('pca' in k for k in param_grid) \
+    cleaned_grid, removed_values = _sanitize_param_grid(
+        features, labels, param_grid, n_splits
+    )
+
+    pipe = make_pca_svm_pipeline() if any('pca' in k for k in cleaned_grid) \
         else make_scaler_svm_pipeline()
 
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    gs = GridSearchCV(pipe, param_grid, cv=cv,
+    gs = GridSearchCV(pipe, cleaned_grid, cv=cv,
                       scoring='accuracy', n_jobs=-1, refit=True)
     gs.fit(features, labels)
+    if removed_values:
+        print(
+            f"{label:40s} removed invalid pca__n_components={removed_values} "
+            f"for {n_splits}-fold CV"
+        )
     print(f'{label:40s} CV={gs.best_score_:.4f}  {gs.best_params_}')
     return gs
 
@@ -112,6 +143,11 @@ def select_best_honest_model(candidates: dict, leaky_keys: set):
         (k for k in candidates if k not in leaky_keys),
         key=lambda k: candidates[k][0].best_score_,
     )
+
+
+def format_honest_candidate_label(best_honest_name: str) -> str:
+    """Return the display label used for the saved honest-model candidate."""
+    return f"{best_honest_name} (aug-aware, honest)"
 
 
 def print_model_comparison(candidates: dict, leaky_keys: set):
