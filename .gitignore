@@ -1898,3 +1898,7 @@ kul-computer-vision-ga-1-2026/train/train_78.npy
 kul-computer-vision-ga-1-2026/train/train_79.npy
 .vscode/settings.json
 .claude/settings.local.json
+
+# DL package large files (uploaded as Kaggle dataset separately)
+Part1/dl_package/checkpoints/
+Part1/dl_package/data/processed/

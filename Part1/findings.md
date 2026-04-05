@@ -1,59 +1,80 @@
 # Findings & Decisions — CV Assignment 1
 
-## Requirements
-- 3 类人脸识别（Look-alike=0, Jesse=1, Mila=2），80 训练 / 1816 测试
-- 目标：最大化 Kaggle 公榜准确率
-- 使用传统特征（HOG、LBP）+ 经典分类器（SVM）
+## Core Submission Constraint
+- the final graded artifact is the Kaggle notebook
+- this means the notebook must not only explain the work, it must also run the final submission pipeline
+- earlier experiments may be documented rather than re-run, but the final pipeline must be executable
 
-## 实验结果汇总
+## Current Notebook Strategy
 
-### 基线实验（无数据增强，80 原始样本）
+### What remains in the notebook body
+- the classical feature pipeline remains as the course baseline
+- the DL section is added after Section 4.5 as the competition-oriented improvement stage
+- the final notebook now treats the work as a two-stage story:
+  - classical baseline
+  - competition-stage deep learning upgrade
 
-| 管线 | CV 准确率 | 最优参数 | 诚实？ |
-|------|-----------|----------|--------|
-| [A] HOG+PCA+SVM | 0.8875 | C=10, γ=auto, n_components=30 | ✓ |
-| [C] HOG+LBP+PCA+SVM | 0.8875 | C=10, γ=scale, n_components=50 | ✓ |
-| [B] LBP+SVM | 0.7500 | C=10, γ=0.001 | ✓ |
-| [D] Pixel PCA+SVM | 0.7375 | C=1, γ=scale, n_components=50 | ✓ |
+### What must not be done
+- do not rewrite `0.2/0.3` as if the whole notebook always used the final `multiface` preprocessing
+- do not turn the DL section into a long log of failed experiments
+- do not present internal experiment labels as if they were standard CV terminology without explanation
 
-### 数据增强实验（Section 4.3/4.4 — 存在数据泄露！）
+## Main Technical Findings
 
-| 管线 | CV 准确率 | Kaggle 公榜 | 泄露说明 |
-|------|-----------|-------------|----------|
-| [E] HOG+PCA+SVM (aug) | **0.9781** | **0.80506** | ← 先增强再 CV → 泄露！ |
-| [F] HOG+LBP+PCA+SVM (aug) | 0.9750 | 未测试 | 同样泄露 |
-| [G] LBP+SVM (aug) | 0.8219 | 未测试 | 同样泄露 |
+### 1. The strongest gain did not come from a more exotic loss
+The key performance jump in the DL part came from better face selection and cleaner training inputs, not from switching to more complicated losses or fusion tricks.
 
-**泄露机制：** 80 张图先增强为 320 张，再做 StratifiedKFold(5)。
-val 折中含有某图的增强版本（H-flip 或 ±10° 旋转），而该图原图在 train 折中。
-SVM 见过"几乎相同"的图 → CV 虚高 ~17 个百分点。
+Main evidence:
 
-### 增强感知 CV 实验（Section 4.5 — 进行中）
+| Experiment | Summary | Public score |
+|-----------|---------|-------------:|
+| `exp_061` | ViT deep baseline with earlier heuristic face crop + open-set scoring | `0.92731` |
+| `exp_088` | stronger multi-face-aware selected crop + same general inference family | `0.98403` |
 
-| 管线 | CV 准确率 | 泄露？ | 状态 |
-|------|-----------|--------|------|
-| [H] HOG+PCA+SVM（折内增强） | TBD | ✗ | 待运行 |
-| [I] HOG+LBP+PCA+SVM（折内增强） | TBD | ✗ | 待运行 |
+### 2. The notebook should present `exp_061 -> exp_088 -> exp_109` as the primary chain
+This is the shortest result chain that still explains the final system clearly.
 
-## Technical Decisions
+Recommended roles:
+- `exp_061`: first deep feature baseline
+- `exp_088`: main system gain
+- `exp_109`: final narrow corrupted-image fix
 
-| Decision | Rationale |
-|----------|-----------|
-| 每折内增强（而非全量先增强） | 避免 val 折看到 train 折的增强版本 |
-| ParameterGrid 手动 CV 循环 | GridSearchCV 无法将增强逻辑嵌入折内 |
-| 验证集 = 原始图（不增强） | 反映真实部署场景——预测时不做增强 |
-| 最终模型用全量 80+aug 训练 | 超参已诚实选定，全量训练提升模型 |
+### 3. `exp_110` is not a main result
+`exp_110` is useful only as a negative control:
+- `exp_109 = 0.98568`
+- `exp_110 = 0.98348`
 
-## Resources
+Conclusion:
+- keep `exp_110` in one sentence
+- do not put it in the main result table
 
-- Notebook: `Kaixi_Work/Kaixi_Work.ipynb`
-- 数据目录: 见 cell 4（自动检测路径）
-- Python 环境: `/c/Users/31667/.conda/envs/biometrics/python.exe`
-- Submission: `Kaixi_Work/submission_improved.csv`
+### 4. The old preprocessing description had a factual mismatch
+Earlier notebook text said that when multiple faces are detected, the pipeline simply takes the first one. This did not match the actual HAAR preprocessing code, which uses a heuristic score based on area, centrality, sharpness, and filtering logic.
 
-## Issues Encountered
+Resolution:
+- the notebook wording was corrected
 
-| Issue | Resolution |
-|-------|------------|
-| Section 4.4 增强全量再 CV → 泄露，Kaggle 0.805 | 重新实现 Section 4.5 折内增强 |
-| nbformat 4.4 cells 无 id 字段 | 直接用 Python 修改 notebook JSON 插入 cell |
+### 5. The DL section must explicitly connect back to Section 0.2.1
+The data audit in Section 0.2.1 already identified:
+- multi-face proximity
+- corruption
+- in-the-wild quality issues
+
+Therefore the DL section should not introduce these issues as if they appear for the first time. The correct narrative is:
+- these problems were already observed in the data audit
+- the classical pipeline addressed them in a baseline way
+- the final DL system revisited the same stage with a stronger preprocessing strategy
+
+## Notebook Writing Decisions
+
+| Decision | Reason |
+|----------|--------|
+| rename `4.6` to emphasize the transition from classical features to a deep baseline | reduces the abrupt jump from Section 4.5 |
+| rewrite `4.7` as a preprocessing-centered system improvement | makes the main gain easier to understand |
+| reserve a figure slot in `4.7` for weak crop vs selected crop examples | the claim about unreliable crops needs visual support |
+| replace internal wording like `neighborhood-aware` with clearer phrasing in the report body | reduces unexplained internal jargon |
+
+## Open Evidence Still Needed
+- representative crop comparison figure for Section 4.7
+- final runnable Kaggle inference cells
+- final Kaggle dataset payload definition

@@ -1,0 +1,17 @@
+id,image_path,source_path,class
+39,data/processed/exp_088_multiface_selected_faces_112/val/39.png,data/raw/kul-computer-vision-ga-1-2026/train/train_39.npy,2
+51,data/processed/exp_088_multiface_selected_faces_112/val/51.png,data/raw/kul-computer-vision-ga-1-2026/train/train_51.npy,2
+42,data/processed/exp_088_multiface_selected_faces_112/val/42.png,data/raw/kul-computer-vision-ga-1-2026/train/train_42.npy,0
+22,data/processed/exp_088_multiface_selected_faces_112/val/22.png,data/raw/kul-computer-vision-ga-1-2026/train/train_22.npy,1
+25,data/processed/exp_088_multiface_selected_faces_112/val/25.png,data/raw/kul-computer-vision-ga-1-2026/train/train_25.npy,0
+1,data/processed/exp_088_multiface_selected_faces_112/val/1.png,data/raw/kul-computer-vision-ga-1-2026/train/train_1.npy,2
+53,data/processed/exp_088_multiface_selected_faces_112/val/53.png,data/raw/kul-computer-vision-ga-1-2026/train/train_53.npy,1
+33,data/processed/exp_088_multiface_selected_faces_112/val/33.png,data/raw/kul-computer-vision-ga-1-2026/train/train_33.npy,2
+56,data/processed/exp_088_multiface_selected_faces_112/val/56.png,data/raw/kul-computer-vision-ga-1-2026/train/train_56.npy,2
+70,data/processed/exp_088_multiface_selected_faces_112/val/70.png,data/raw/kul-computer-vision-ga-1-2026/train/train_70.npy,1
+26,data/processed/exp_088_multiface_selected_faces_112/val/26.png,data/raw/kul-computer-vision-ga-1-2026/train/train_26.npy,2
+5,data/processed/exp_088_multiface_selected_faces_112/val/5.png,data/raw/kul-computer-vision-ga-1-2026/train/train_5.npy,1
+7,data/processed/exp_088_multiface_selected_faces_112/val/7.png,data/raw/kul-computer-vision-ga-1-2026/train/train_7.npy,1
+54,data/processed/exp_088_multiface_selected_faces_112/val/54.png,data/raw/kul-computer-vision-ga-1-2026/train/train_54.npy,1
+32,data/processed/exp_088_multiface_selected_faces_112/val/32.png,data/raw/kul-computer-vision-ga-1-2026/train/train_32.npy,0
+58,data/processed/exp_088_multiface_selected_faces_112/val/58.png,data/raw/kul-computer-vision-ga-1-2026/train/train_58.npy,0
