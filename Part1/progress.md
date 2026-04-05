@@ -276,3 +276,29 @@
   - three PCA visuals in `cell 34` (eigenfaces, explained variance, progressive reconstruction)
   - two PCA-space visuals in `cell 36` (`PC1 / PC2` scatter + `t-SNE`)
 - the fast submission path still executes successfully in about `40 s`
+
+## Session: 2026-04-05 (reporting clean-up for Sections 4.3-4.8)
+
+### Completed in this session
+
+**1. Removed implementation-facing debug output from the classical search report**
+- `cell 56` no longer prints `removed invalid pca__n_components`
+- the saved notebook now shows only the final offline search results that matter for grading
+
+**2. Tightened the tie explanation for `[H]` vs `[I]`**
+- the previous wording implied that some hidden detailed output broke the tie in favour of `[H]`
+- this was replaced with a simpler and defensible explanation: both honest CV scores are equal, so `[H]` is kept because it is the simpler pipeline and there is no evidence that adding LBP helps
+
+**3. Added the missing context for `exp_061`**
+- `4.7` now defines `exp_061` before using it as the baseline reference
+- this makes the transition from the first deep baseline to the multi-face input revision readable without requiring the reader to infer what `exp_061` was
+
+**4. Clarified why the 3-image placeholder patch maps to class 2**
+- `4.8` now states that the three overridden test IDs match a known class-2 `IMAGE NOT FOUND` placeholder pattern seen in labeled training data
+- it also states explicitly that this was not treated as a general rule for all corrupted images
+
+### Verification
+
+- reran `ga1_Group_6.ipynb` through `cell 60`
+- confirmed that the saved `cell 56` output no longer contains the invalid-grid debug lines
+- confirmed that the updated markdown for `4.5`, `4.7`, and `4.8` is present in the saved notebook
