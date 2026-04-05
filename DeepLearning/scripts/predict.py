@@ -79,6 +79,22 @@ def _collect_embeddings(model, dataloader, device, use_horizontal_flip_tta: bool
     return torch.cat(embeddings, dim=0), torch.cat(values, dim=0)
 
 
+def _collect_softmax_probabilities(model, dataloader, device, use_horizontal_flip_tta: bool = False):
+    probabilities = []
+    values = []
+    model.eval()
+    with torch.no_grad():
+        for images, batch_values in dataloader:
+            images = images.to(device)
+            probs = torch.softmax(model(images), dim=1)
+            if use_horizontal_flip_tta:
+                probs_flip = torch.softmax(model(torch.flip(images, dims=[3])), dim=1)
+                probs = 0.5 * (probs + probs_flip)
+            probabilities.append(probs.detach().cpu())
+            values.append(batch_values.detach().cpu())
+    return torch.cat(probabilities, dim=0), torch.cat(values, dim=0)
+
+
 def _load_model_from_checkpoint(config, checkpoint_path: str):
     train_df = pd.read_csv(project_path(config["data"]["splits_dir"]) / "train.csv")
     loss_config = config.get("loss", {})
@@ -315,6 +331,47 @@ def _run_ensemble_prototype_inference(config, datamodule, test_df, output_root: 
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "prototype_metrics.json").write_text(
         json.dumps(ensemble_metrics, indent=2),
+        encoding="utf-8",
+    )
+
+    id_to_prediction = {
+        int(sample_id): int(pred)
+        for sample_id, pred in zip(test_ids.tolist(), test_predictions.tolist())
+    }
+    return [id_to_prediction[int(sample_id)] for sample_id in test_df["id"].tolist()]
+
+
+def _run_softmax_inference(config, datamodule, model, test_df, output_root: Path):
+    inference_config = config.get("inference", {})
+    use_horizontal_flip_tta = inference_config.get("tta_horizontal_flip", False)
+    device = torch.device("cuda" if torch.cuda.is_available() and config["train"]["accelerator"] != "cpu" else "cpu")
+    model = model.to(device)
+
+    val_probabilities, val_labels = _collect_softmax_probabilities(
+        model,
+        datamodule.val_dataloader(),
+        device,
+        use_horizontal_flip_tta=use_horizontal_flip_tta,
+    )
+    test_probabilities, test_ids = _collect_softmax_probabilities(
+        model,
+        datamodule.predict_dataloader(),
+        device,
+        use_horizontal_flip_tta=use_horizontal_flip_tta,
+    )
+
+    val_predictions = torch.argmax(val_probabilities, dim=1)
+    test_predictions = torch.argmax(test_probabilities, dim=1)
+    val_accuracy = (val_predictions == val_labels).float().mean().item()
+
+    softmax_metrics = {
+        "mode": "softmax",
+        "tta_horizontal_flip": use_horizontal_flip_tta,
+        "val_accuracy": val_accuracy,
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "softmax_metrics.json").write_text(
+        json.dumps(softmax_metrics, indent=2),
         encoding="utf-8",
     )
 
@@ -2549,6 +2606,8 @@ def main() -> None:
     )
     if inference_mode == "prototype":
         ordered_predictions = _run_prototype_inference(config, datamodule, model, test_df, output_root)
+    elif inference_mode == "softmax":
+        ordered_predictions = _run_softmax_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "conservative_graph_refine":
         ordered_predictions = _run_conservative_graph_refine_inference(config, datamodule, model, test_df, output_root)
     elif inference_mode == "global_label_spread":

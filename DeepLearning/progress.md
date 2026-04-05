@@ -2187,3 +2187,43 @@
     - 约 `11.8 GB`
   - 两轮清理累计释放空间：
     - 约 `17.764 GB`
+
+## 2026-04-05
+
+### Session 76
+
+- 为验证 `open-set` 推理是否确有必要，新增一个**只改推理、不重训**的受控对照：
+  - `exp_111_vit_adaface_multiface_selected_20ep_last2block_ce_softmax_hfliptta`
+- 该实验完全复用 `exp_088` 的：
+  - 多脸选人输入协议
+  - `ViT AdaFace + CE + last2block` 训练设定
+  - `best.ckpt`
+- 唯一变化是把推理从：
+  - `neighborhood_aware + rejection`
+  改为：
+  - 直接使用分类头 `softmax argmax`
+- 为避免引入第二个变量，已在 `softmax` 推理分支中补齐 `horizontal flip TTA`，保证与 `exp_088` 的测试时增强一致。
+- 产物：
+  - 配置：
+    - `configs/experiments/exp_111_vit_adaface_multiface_selected_20ep_last2block_ce_softmax_hfliptta.yaml`
+  - 本地输出：
+    - `outputs/exp_111_vit_adaface_multiface_selected_20ep_last2block_ce_softmax_hfliptta/softmax_metrics.json`
+  - submission：
+    - `data/submissions/20260405_142713_exp_111_vit_adaface_multiface_selected_20ep_last2block_ce_softmax_hfliptta_submission.csv`
+- 本地结果：
+  - `val_accuracy = 1.0`
+- 与 `exp_088` 的 test submission 逐行对比：
+  - 共改动 `162` 张
+  - 全部都是把原来的 `class 0` 放成 target：
+    - `0 -> 2: 93`
+    - `0 -> 1: 69`
+  - 预测分布从：
+    - `exp_088 = {0: 941, 1: 451, 2: 424}`
+    变为：
+    - `exp_111 = {0: 779, 1: 520, 2: 517}`
+- 当前结论：
+  - 在这条 `ViT + multiface-selected` 主线上，直接三分类 `softmax` 会明显削弱对 `other` 的拒识能力
+  - 这条对照即使本地 `val_accuracy` 仍为 `1.0`，test 侧行为却已经明显偏向过度放出 target
+  - 因此它很适合作为 notebook 中证明 `open-set` 推理必要性的受控消融
+  - 用户已提交 Kaggle，public score 为 `0.90143`
+  - 相比 `exp_088 = 0.98403` 明显下降，进一步说明在这条最终主线上，open-set 推理不是可有可无的后处理，而是性能成立的必要部分
