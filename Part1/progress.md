@@ -302,3 +302,64 @@
 - reran `ga1_Group_6.ipynb` through `cell 60`
 - confirmed that the saved `cell 56` output no longer contains the invalid-grid debug lines
 - confirmed that the updated markdown for `4.5`, `4.7`, and `4.8` is present in the saved notebook
+
+## Session: 2026-04-05 (full notebook polish + Kaggle submission)
+
+### Completed in this session
+
+**1. Full notebook review and style overhaul**
+- all medium and small issues from the professor review pass were addressed
+- Section 1.2 (PCA): replaced 7-section textbook prose with a flowchart (`figures/pca_pipeline.png`) + 5 compact paragraphs
+- Section 3.0 / 3.1: compressed from ~450 words to ~100 words total
+- Section 4.0: added theoretical expected CV baseline (~0.34) as reference
+- Section 4.1: renamed to "Baseline: Pixel-PCA + SVM" to distinguish from HOG-based pipelines
+- Section 4.2: renamed to "Feature Preparation" to accurately reflect its role
+- Section 4.6: added forward reference for `exp_088` so it is not undefined when first cited
+- Section 6 Discussion: expanded from 3 paragraphs to 5, covering HOG vs PCA qualitative comparison, why classical performance plateaued, why DL improved, and what we would do with more time
+- Cell 0: removed template-style language from Section 0.1
+- Cell 12: fixed blank HAAR parameter names (`scaleFactor`, `minNeighbors`)
+- Cell 28/30: fixed t-SNE description typos and softened overconfident "clear separations" claim
+- Cell 1: TODO red text still present — name fields not yet filled in (blocked on teammates confirming names)
+
+**2. Kaggle dataset packaged and submitted**
+- packaged `src/`, `figures/`, `dl_package/` into `group6-dl-final.zip` (871 MB)
+- uploaded to Kaggle as dataset `enminlin/group6-dl-final`
+- actual Kaggle dataset path confirmed as `/kaggle/input/datasets/enminlin/group6-dl-final/`
+- Cell 0 and Cell 67 (`DL_ROOT`) updated to use the confirmed path
+- Cell 69 (`Load data`): added symlink `data/ → DL_ROOT/data/` to resolve relative image paths in CSVs
+- DL dependencies installed via Kaggle Dependency Manager: `lightning`, `albumentations`, `timm`, `torchmetrics`, `fvcore`
+- notebook ran successfully end-to-end on Kaggle; `submission.csv` produced
+
+### Current State
+- [x] Notebook runs end-to-end on Kaggle
+- [x] submission.csv produced and submitted to competition
+- [x] All severe and medium review issues addressed
+- [x] Cell 1 student names filled in (done manually)
+- [x] Second review pass completed (see below)
+
+## Session: 2026-04-06 (second professor review pass)
+
+### Completed in this session
+
+**1. Second full review against assignment PDF**
+- re-read entire notebook as a strict grader
+- identified 8 remaining issues across severe/medium/small categories
+- items from original template (";)", "Let's plot", accuracy disclaimer) confirmed acceptable and left unchanged
+
+**2. Issues resolved**
+
+- **Cell 5**: BGR→RGB long explanation compressed to one sentence; detail moved to start of Section 0.3
+- **Cell 10**: "Dataset Analysis & Strategy Formulation" (3 verbose paragraphs) replaced with 2-sentence factual summary; avoids duplication with Section 0.2.1
+- **Cell 12**: Added BGR→RGB bridging sentence at start of Section 0.3
+- **Cell 19**: Removed "flagged / human review" language that had no visible evidence; replaced with reference to the visible blurry crops in the face plots and the decision to retain all samples
+- **Cell 20**: Removed fictitious semi-automated flagging pipeline description; rewritten to describe the design rationale for each quality metric and the actual decision made (no deletion)
+- **Cell 30**: Fixed grammar error in first HOG property bullet ("that undergoes" → correct phrasing)
+- **Cell 37**: Removed "& Academic Reflection" from Section 1.2.3 title
+- **Cells 54/57**: Split merged "4.3 & 4.4" header into two independent sections with their own titles and motivations; new 4.4 header explains the leaky protocol and why it is not used for final selection
+
+### Current State
+- [x] Notebook runs end-to-end on Kaggle
+- [x] submission.csv produced and submitted
+- [x] All severe, medium, and small review issues addressed across two review passes
+- [x] Student names filled in
+- [x] progress.md up to date
